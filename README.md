@@ -9,7 +9,7 @@ management: it **audits them**, checking what they promised against what they de
 | Layer | What works today |
 |---|---|
 | **Push** (Brief tab) | Live NSE filings for an 18-stock portfolio over 24h / 3d / 7d / 30d. Filings are classified into the reference categories and priority-scored; routine ones are folded away. **Results** cards show Revenue / EBITDA / PBT / PAT with QoQ and YoY. **Management change** cards show the appointee's profile, read from the filing's own SEBI-mandated "brief profile" annexure, plus who in your network worked or studied with them. **M&A / capex / litigation** cards show the best person to call and why. Configurable **alerts** cover volume (× 20-day average) and price (±% per day), plus the filing types you always want surfaced. "Natural reasons to reconnect" nudges you when a contact you haven't spoken to recently has an (ex-)employer in the news. |
-| **Pull** (Ask tab) | Works on **any** NSE symbol: business, headline ratios, an 8-quarter strip, a 6-year trajectory with CAGR, balance sheet (D/E, cash-conversion cycle, ROCE), cash quality (CFO ÷ PAT per year), and **promised vs delivered** across the last earnings-call transcripts, judged only against reported numbers. Also bull vs bear, and who in your network can help. |
+| **Pull** (Ask tab) | Works on **any** NSE symbol: business, headline ratios, an 8-quarter strip, a 6-year trajectory with CAGR, balance sheet (D/E, cash-conversion cycle, ROCE), cash quality (CFO ÷ PAT per year), and **promised vs delivered** across the last earnings-call transcripts. Company-level promises are judged against reported numbers. Segment and KPI promises are judged against what management itself reported on *later* calls, cited by call month. Unfinished horizons show progress so far ("behind so far"). Also bull vs bear, and who in your network can help. |
 | **Network** (People tab) | "Who should I call about…", an expertise map, warmth (tie × recency), second-degree intros, and a career/education sheet per person. The network is woven into every Push card and every research page. |
 
 > **The network is 100% synthetic.** The people are fictional; their employers are real so they overlap the portfolio. The market data, filings, financials and transcripts are real and live.
@@ -72,7 +72,7 @@ Answers are cached by prompt hash, and only valid JSON is cached. Quotes are che
 ## Deliberately left out
 - Push notifications. Native push needs an app shell; the "alerts" here are computed on each load.
 - Live LinkedIn enrichment, which would be against LinkedIn's terms. Bios come from the filing itself, which is a primary source and legally clean.
-- Fallback copies for Pull: only the brief has snapshots, so research needs screener.in to be reachable.
+- Live fallback for *every* ticker: snapshots cover the brief and the five demo research picks. Any other ticker needs screener.in to be reachable.
 - Logins and accounts.
 - BSE's JSON API, which blocks scripts; NSE covers the same filings.
 

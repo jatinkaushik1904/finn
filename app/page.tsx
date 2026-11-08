@@ -122,6 +122,8 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
   const [showRoutine, setShowRoutine] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const slow = useRef(false);
+  const manual = useRef(false);
+  const [widened, setWidened] = useState<number | null>(null);
 
   const save = (n: Settings, debounce = false) => {
     slow.current = debounce;
@@ -135,11 +137,19 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
     const t = setTimeout(async () => {
       setLoading(true); setErr(null);
       try {
-        const q = new URLSearchParams({ hours: String(s.hours), volX: String(s.volX), movePct: String(s.movePct), cares: s.cares.join(",") });
-        const r = await fetch(`/api/brief?${q}`, { signal: ac.signal });
-        const j = await r.json();
-        if (j?.error || !Array.isArray(j?.items)) setErr(j?.error ?? "The brief came back empty.");
-        else setB(j as Brief);
+        // A quiet default window shouldn't open on "nothing": widen 24h → 3d → 7d until something
+        // material shows up — unless the investor picked the window themself.
+        const tries = manual.current ? [s.hours] : [s.hours, ...[72, 168].filter((h) => h > s.hours)];
+        let got: Brief | null = null;
+        for (const h of tries) {
+          const q = new URLSearchParams({ hours: String(h), volX: String(s.volX), movePct: String(s.movePct), cares: s.cares.join(",") });
+          const r = await fetch(`/api/brief?${q}`, { signal: ac.signal });
+          const j = await r.json();
+          if (j?.error || !Array.isArray(j?.items)) { setErr(j?.error ?? "The brief came back empty."); got = null; break; }
+          got = j as Brief;
+          if (got.items.some((i) => i.priority >= MATERIAL)) break;
+        }
+        if (got) { setB(got); setWidened((got.settings?.hours ?? s.hours) !== s.hours ? s.hours : null); }
       } catch {
         if (!ac.signal.aborted) setErr("Couldn't reach FINN's server.");
       } finally {
@@ -167,8 +177,8 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
       <div className="flex items-center gap-2 py-2">
         <div className="flex rounded-full border border-line bg-card" role="radiogroup" aria-label="Digest window">
           {WINDOWS.map((w) => (
-            <button key={w.h} role="radio" aria-checked={s.hours === w.h} onClick={() => save({ ...s, hours: w.h })}
-              className={`h-10 min-w-11 rounded-full px-3 text-xs font-medium tabular-nums ${s.hours === w.h ? "bg-ink text-bg" : "text-mute"}`}>{w.l}</button>
+            <button key={w.h} role="radio" aria-checked={shownHours === w.h} onClick={() => { manual.current = true; save({ ...s, hours: w.h }); }}
+              className={`h-10 min-w-11 rounded-full px-3 text-xs font-medium tabular-nums ${shownHours === w.h ? "bg-ink text-bg" : "text-mute"}`}>{w.l}</button>
           ))}
         </div>
         <button onClick={() => setShowSettings(!showSettings)} aria-expanded={showSettings}
@@ -219,6 +229,12 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
             <span className="tabular-nums">{b.stats.total} filings · {b.stats.companies} holdings · {routine.length} folded</span>
             {loading ? <span>Updating…</span> : <SourceBadge live={b.source !== "snapshot"} at={b.generatedAt} />}
           </div>
+
+          {widened != null && (
+            <p className="mb-3 rounded-xl bg-accent/10 px-3 py-2 text-xs text-accent">
+              Nothing material in the last {widened}h, so FINN widened to {win?.long ?? `${shownHours}h`}.
+            </p>
+          )}
 
           <Alerts alerts={b.alerts ?? []} s={s} onCompany={onCompany} />
 
@@ -297,7 +313,7 @@ function Alerts({ alerts, s, onCompany }: { alerts: Alert[]; s: Settings; onComp
   );
 }
 
-type LeadLike = { id: string; name: string; why: string; via?: string; headline?: string; relation?: string };
+type LeadLike = { id: string; name: string; why: string; via?: string; headline?: string; relation?: string; ask?: string };
 /** One row per person: a direct line first, with a warmer second-degree route folded in. */
 function mergeLeads<T extends LeadLike>(ls: T[]): (T & { alsoVia?: string })[] {
   const out: (T & { alsoVia?: string })[] = [];
@@ -318,6 +334,7 @@ function LeadRow({ l, onPerson, verb = "Call" }: { l: LeadLike & { alsoVia?: str
       <div className="min-w-0 text-xs leading-snug">
         <div><span className="font-medium">{l.via ? `Reach ${first(l.name)}` : `${verb} ${first(l.name)}`}</span>{l.via ? <span className="text-mute"> via {l.via}</span> : null}{l.headline && !/^Works there now/.test(l.why) ? <span className="text-mute"> · {l.headline}</span> : null}</div>
         <div className="text-mute">{l.why}</div>
+        {l.ask ? <div className="mt-0.5 text-ink/80">Ask: “{l.ask}”</div> : null}
         {l.alsoVia ? <div className="text-accent">Warmer route: intro via {l.alsoVia}</div> : null}
       </div>
     </button>

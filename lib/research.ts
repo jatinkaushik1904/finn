@@ -370,6 +370,36 @@ export function guidanceSentences(turns: Turn[], maxChars = 6000, max = 30): Sen
   return kept.map((s, i) => ({ ...s, n: i + 1 }));
 }
 
+// What management says it ACTUALLY did (past tense + a number) — on a later call this is primary
+// evidence for promises the consolidated table can't measure (segments, volumes, store adds…).
+const ACT = /\b(was|were|grew|stood at|reported|registered|delivered|achieved|recorded|declined|clocked|increased|decreased|rose|fell|expanded|improved|came in|ended|added|opened|crossed)\b/i;
+const KPI = /\b(grew|growth|margin|revenue|sales|volume|EBITDA|EBIT|profit|PAT|stores?|order|capex|debt|market share|units)\b/i;
+export function actualSentences(turns: Turn[], maxChars = 2400, max = 14): string[] {
+  const out: { n: number; s: string; score: number }[] = [];
+  let pos = 0;
+  for (const t of turns) {
+    if (t.role !== "mgmt") continue;
+    const prot = t.text.replace(/\s+/g, " ").replace(/\b(Mr|Ms|Mrs|Dr|Rs|No|vs|approx|Co|Ltd|Inc|St|Nos)\./g, "$1․");
+    for (const raw of prot.split(/(?<=[.?!])\s+(?=[A-Z"“(₹])/)) {
+      const s = raw.replace(/․/g, ".").trim();
+      pos++;
+      if (s.length < 40 || s.length > 400 || /\?\s*$/.test(s) || !NUM.test(s) || !ACT.test(s)) continue;
+      if ((s.match(FWD)?.length ?? 0) > 1) continue; // mostly forward-looking: not a fact
+      const nums = s.match(new RegExp(NUM.source, "gi"))?.length ?? 0;
+      out.push({ n: pos, s, score: nums + (KPI.test(s) ? 2 : 0) });
+    }
+  }
+  const top = out.sort((a, b) => b.score - a.score).slice(0, max).sort((a, b) => a.n - b.n);
+  const kept: string[] = [];
+  let chars = 0;
+  for (const x of top) {
+    if (chars + x.s.length > maxChars) continue;
+    chars += x.s.length;
+    kept.push(x.s);
+  }
+  return kept;
+}
+
 export type Promise_ = { call: string; metric: string; promise: string; horizon: string; quote: string };
 export type VerdictKind = "delivered" | "missed" | "partly" | "too early" | "unverifiable";
 export type Verdict = Promise_ & {
@@ -488,8 +518,9 @@ async function computeNarrative(r: Research, budgetMs: number) {
     const text = await Promise.race([pdfText(c.transcript!, 30), new Promise<string>((_, rej) => setTimeout(() => rej(new Error("pdf timeout")), Math.min(20_000, Math.max(1_000, left() - 25_000))))]);
     const p = parseTranscript(text, c.month);
     const sents = guidanceSentences(p.turns);
+    const facts = actualSentences(p.turns);
     const mgmtChars = p.turns.filter((t) => t.role === "mgmt").reduce((a, t) => a + t.text.length, 0);
-    return { ...c, url: c.transcript!, ...p, sents, textChars: text.length, mgmtChars, ms: Date.now() - ts };
+    return { ...c, url: c.transcript!, ...p, sents, facts, textChars: text.length, mgmtChars, ms: Date.now() - ts };
   });
   timings.transcripts = Date.now() - t0;
   // Prefer quarterly earnings calls (one per quarter, most recent first); fall back to whatever else.
@@ -549,12 +580,22 @@ async function computeNarrative(r: Research, budgetMs: number) {
     if (amt != null && scale && amt < 0.4 * scale) { p.scope = "segment"; p.subject = `a business line (₹${amt.toLocaleString("en-IN")} cr is far below company scale)`; }
   }
   const all = [...byKey.values()];
-  // Segment guidance can't be checked against consolidated filings: label it honestly, don't ask the judge.
-  // So can a metric the filings don't carry (LDR, order inflow, headcount): no judge call for either.
+  // Two kinds of evidence. (A) the reported table, for company-level metrics it carries.
+  // (B) management's own statements of what they achieved on a LATER call — the only fair test for
+  // segment / volume / KPI guidance the consolidated filings don't break out.
   const MEASURABLE = /revenue|growth|sales|margin|profit|ebitda|pat|capex|debt|working|tax|asset quality|npa/i;
   const offTable = (p: Extracted) => p.scope !== "company" || !MEASURABLE.test(`${p.metric} ${p.promise}`);
-  const segment = all.filter(offTable).sort((a, b) => Number(a.scope === "company") - Number(b.scope === "company")).slice(0, 3);
-  const promises = all.filter((p) => !offTable(p)).slice(0, 8).map((p, i) => ({ ...p, id: i + 1 }));
+  const promises = [...all.filter((p) => !offTable(p)), ...all.filter(offTable)].slice(0, 10).map((p, i) => ({ ...p, id: i + 1, offTable: offTable(p) }));
+  const segment = promises.filter((p) => p.offTable);
+  const mIdx = (m: string) => idx(m) ?? 0;
+  const oldest = promises.length ? Math.min(...promises.map((p) => mIdx(p.call))) : 0;
+  let evChars = 0;
+  const evidence = calls
+    .filter((c) => mIdx(c.month) > oldest && c.facts.length)
+    .sort((a, b) => mIdx(a.month) - mIdx(b.month))
+    .map((c) => `Call ${c.month}${c.quarter ? ` (on ${fyLabel(c.quarter)} results)` : ""} — management said:\n${c.facts.map((s, i) => `  ${i + 1}) ${s}`).join("\n")}`)
+    .filter((b) => (evChars += b.length) <= 7000)
+    .join("\n");
 
   // 4. Smart tier: one judgement over everything.
   let verdicts: Verdict[] | null = null;
@@ -571,9 +612,10 @@ async function computeNarrative(r: Research, budgetMs: number) {
     const latestIdx = idx(nums.latest);
     const prompt =
       `${r.name} — reported figures, ${r.basis}, INR crore. Latest reported quarter: ${nums.latest} (${fyLabel(nums.latest)}). Nothing after it has been reported.\n${nums.text}\n\n` +
-      `Company-level guidance management gave on the last ${calls.length} earnings calls (each call discusses the quarter named and guides forward from it):\n` +
-      promises.map((p) => `#${p.id} [call ${p.call}${fyOfMonth(p.call) ? ` (in FY${fyOfMonth(p.call)})` : ""}${p.quarter ? `, on ${fyLabel(p.quarter)} results` : ""}] ${p.metric} · horizon "${p.horizon}" · ${p.promise} — "${p.quote}"`).join("\n") +
-      `\n\nRules: resolve each horizon to fiscal quarters ("next quarter" = the quarter after the one that call discussed; "this year" = the fiscal year that call falls in). Verdict "delivered", "missed" or "partly" ONLY if every period in the horizon is in the table; if the horizon has not fully arrived, "too early" — and say what the reported run-rate shows so far. If a figure is clearly not company-wide (far from the company's scale) or the table cannot measure the metric (volume, NIM, loan growth, order book, capex detail), "unverifiable". You have no exchange rates: never convert USD or other currencies — judge a USD target only through growth rates, else "too early"/"unverifiable". ${r.isFinancial ? "This is a lender: 'margin' guidance means NIM, which the table does not have — \"unverifiable\"; so are loan/deposit growth, LDR, credit cost and cost-to-income." : "Margin promises compare against OPM."} Growth promises compare against the YoY columns. Tax-rate guidance compares against the tax rate column. Quote figures exactly as given in the table; do not re-add quarters that the table already totals. If the metric or what a number refers to is unclear, "unverifiable" — never guess which line it maps to.\n` +
+      `${evidence ? `(B) What management itself reported on later calls (primary source — their own words):\n${evidence}\n\n` : ""}` +
+      `Guidance management gave on the last ${calls.length} earnings calls (each call discusses the quarter named and guides forward from it):\n` +
+      promises.map((p) => `#${p.id} [call ${p.call}${fyOfMonth(p.call) ? ` (in FY${fyOfMonth(p.call)})` : ""}${p.quarter ? `, on ${fyLabel(p.quarter)} results` : ""}] [${p.offTable ? `segment/KPI: ${p.subject || "not company-wide"}` : "company-level"}] ${p.metric} · horizon "${p.horizon}" · ${p.promise} — "${p.quote}"`).join("\n") +
+      `\n\nRules: resolve each horizon to fiscal quarters ("next quarter" = the quarter after the one that call discussed; "this year" = the fiscal year that call falls in). Verdict "delivered", "missed" or "partly" ONLY if every period in the horizon has been reported; if the horizon has not fully arrived, "too early" — and say what the run-rate shows so far. Company-level promises: judge against the table (management's later statements may support). Segment/KPI promises: judge ONLY from (B) — a statement on a call LATER than the promise, about the same business/metric — and cite it as "per <month> call"; if (B) has nothing on it, "unverifiable". If the table cannot measure a company-level metric (volume, NIM, loan growth, order book, capex detail) and (B) is silent, "unverifiable". You have no exchange rates: never convert USD or other currencies — judge a USD target only through growth rates, else "too early"/"unverifiable". ${r.isFinancial ? "This is a lender: 'margin' guidance means NIM, which the table does not have — \"unverifiable\"; so are loan/deposit growth, LDR, credit cost and cost-to-income." : "Margin promises compare against OPM."} Growth promises compare against the YoY columns. Tax-rate guidance compares against the tax rate column. Quote figures exactly as given in the table; do not re-add quarters that the table already totals. If the metric or what a number refers to is unclear, "unverifiable" — never guess which line it maps to.\n` +
       `Return JSON {"verdicts":[{"id":<#>,"delivered":"<=25 words: what the reported numbers show, with figures and periods","verdict":"delivered|missed|partly|too early|unverifiable","note":"<=12 words"}],"bull":["<=3 points, <=18 words each, about the last 4 quarters and the guidance track record, grounded only in the figures above"],"bear":["<=3, same rules"]}`;
     judge = await llm<{ verdicts?: { id: number; delivered?: string; verdict?: string; note?: string }[]; bull?: string[]; bear?: string[] }>(
       "smart", JUDGE_SYS, prompt, 2500, { timeoutMs: Math.max(2_000, Math.min(40_000, left() - 1_000)) });
@@ -582,7 +624,7 @@ async function computeNarrative(r: Research, budgetMs: number) {
       verdicts = promises.map((p): Verdict => {
         const v = out.verdicts!.find((x) => Number(x.id) === p.id);
         const kind = (v?.verdict && v.verdict in RANK ? v.verdict : "unverifiable") as VerdictKind;
-        const { id: _id, ...rest } = p;
+        const { id: _id, offTable: _off, ...rest } = p;
         const said = (v?.delivered ?? "").replace(/^(delivered|missed|partly|too early|unverifiable)\s*([.:,—-]\s*|$)/i, "") || v?.note || "Not judged";
         // Hard rule, enforced in code: no final verdict before the horizon has been reported.
         const end = horizonEnd(p.horizon, p.call, p.quarter);
@@ -591,11 +633,10 @@ async function computeNarrative(r: Research, budgetMs: number) {
           return { ...rest, delivered: said, verdict: "too early", note: v?.note ? `${so} · ${v.note}` : so };
         }
         return { ...rest, delivered: said, verdict: kind, note: v?.note ?? "" };
-      }).concat(segVerdicts).sort((a, b) => RANK[a.verdict] - RANK[b.verdict]).slice(0, 8);
+      }).sort((a, b) => RANK[a.verdict] - RANK[b.verdict]).slice(0, 8);
       bullBear = { bull: (out.bull ?? []).slice(0, 3), bear: (out.bear ?? []).slice(0, 3) };
     }
   }
-  if (!verdicts && !promises.length && segVerdicts.length) verdicts = segVerdicts;
   timings.judge = Date.now() - t2;
   timings.total = Date.now() - t0;
 
@@ -612,7 +653,7 @@ async function computeNarrative(r: Research, budgetMs: number) {
       sentences: c.sents.slice(0, 4).map((s) => s.text), management: c.management.slice(0, 6),
     })),
     verdicts,
-    promises: verdicts ? undefined : [...promises.map(({ id: _id, ...p }) => p), ...segment], // un-judged guidance if the judge didn't finish
+    promises: verdicts ? undefined : promises.map(({ id: _id, offTable: _o, ...p }) => p), // un-judged guidance if the judge didn't finish
     bullBear,
     // Efficiency readout: what was read, what was sent to which model, how long each stage took.
     stats: {
@@ -624,7 +665,7 @@ async function computeNarrative(r: Research, budgetMs: number) {
   };
 }
 
-const PIPELINE = "pvd-11"; // bump when prompts or rules change, so cached verdicts are recomputed
+const PIPELINE = "pvd-12"; // bump when prompts or rules change, so cached verdicts are recomputed
 
 // Whole-result cache keyed by the exact transcripts and the latest reported quarter: a new call or
 // new results invalidate it automatically. Partial results are never cached.

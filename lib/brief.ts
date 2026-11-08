@@ -20,7 +20,7 @@ import { cached, hash } from "./cache";
 export type Settings = { hours: number; volX: number; movePct: number; cares: Category[] };
 export const DEFAULT_SETTINGS: Settings = { hours: 24, volX: 2, movePct: 4, cares: ["results", "M&A", "management_change", "litigation"] };
 
-export type LeadLite = { id: string; name: string; headline: string; why: string; via?: string; score: number };
+export type LeadLite = { id: string; name: string; headline: string; why: string; via?: string; score: number; ask?: string };
 export type Related = { id: string; time: string; label: string; summary: string; url: string };
 export type Item = {
   id: string; symbol: string; company: string; time: string; category: Category; label: string;
@@ -230,6 +230,24 @@ const lite = (l: ReturnType<typeof leadsForCompany>[number]): LeadLite => ({
   id: l.contact.id, name: l.contact.name, headline: l.contact.headline, why: l.why, via: l.via?.name, score: l.score,
 });
 
+// The one question worth asking this person about this filing (deterministic; no contact data
+// leaves the server). Insiders get "why", peers get "are you seeing it too".
+function askFor(cat: Category, relation: string, company: string): string {
+  const peer = relation === "peer" || relation === "theme";
+  const Q: Partial<Record<Category, [string, string]>> = {
+    results: ["Was this quarter's margin move mix, pricing or one-offs — and does it repeat next quarter?", `Are you seeing the same demand and cost trend that ${company} just reported?`],
+    management_change: ["Why now — and what will the new person change first?", `What's the industry read on this change at ${company}?`],
+    "M&A": ["Why this deal, what are they really paying for, and who pushed for it?", `Does this deal change how ${company} competes with you?`],
+    capex: ["Is there demand to fill this capacity — what payback are they underwriting?", "Is the industry adding capacity at the same time?"],
+    litigation: ["How material is this really, and has it happened before?", `Has this kind of order hit others in the sector, or only ${company}?`],
+    fund_raise: ["Why raise now — growth, balance sheet, or a promoter need?", "Is the sector raising money too, or is this company-specific?"],
+    credit_rating: ["What is the agency worried about that the market isn't?", "Are lenders tightening on the sector?"],
+    pledging: ["Why does the promoter need liquidity right now?", "Is promoter stress showing up anywhere else you know?"],
+  };
+  const q = Q[cat];
+  return q ? q[peer ? 1 : 0] : `Anything about ${company} the filings aren't telling me?`;
+}
+
 // ---------------------------------------------------------------- folding duplicates
 
 type Work = Item & { fp?: string; doc?: string; generic: boolean; thread?: boolean; raw: RawAnn };
@@ -383,7 +401,7 @@ async function liveCore(hours: number): Promise<Core> {
     const leads = leadsForCompany(company, w.summary);
     if (!leads.length) continue;
     const n = ["M&A", "capex", "litigation", "management_change", "fund_raise"].includes(w.category) ? 2 : 1;
-    w.leads = leads.slice(0, n).map(lite);
+    w.leads = leads.slice(0, n).map((l, i) => ({ ...lite(l), ...(i === 0 ? { ask: askFor(w.category, l.relation, company.name) } : {}) }));
     if (leads[0].relation === "inside" || leads[0].relation === "alumni") w.base = Math.min(100, w.base! + 4);
   }
   const resultsFor = could.filter((w) => w.category === "results");

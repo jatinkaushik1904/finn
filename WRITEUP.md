@@ -40,7 +40,7 @@ FINN is a mobile web app with three tabs: Brief, Ask and People.
 
 - Native push notifications and logins.
 - Live LinkedIn enrichment.
-- Saved fallback copies for research. Only the brief has them, so research needs screener.in to be reachable.
+- Saved fallback copies for every company. Only the brief and the five demo research companies have them; any other company needs screener.in to be reachable.
 - BSE's data API, which blocks scripts; NSE covers the same filings.
 
 **Next**

@@ -175,6 +175,25 @@ export const CONTACTS: Contact[] = [
   },
 ];
 
+// Two more contacts whose pasts overlap people who actually appear in recent filings
+// (by school / by former employer as stated in the filing) — the "you know someone who knows them" case.
+CONTACTS.push(
+  {
+    id: "rhea", name: "Rhea Kapur", headline: "Principal, consumer-tech VC fund", city: "Mumbai", tie: "friend",
+    howMet: "Met through IIM-A alumni network, 2023", lastSpoke: "2026-01-18",
+    career: [{ org: "Samsung", role: "Product Marketing", from: 2013, to: 2016 }, { org: "Consumer-tech VC fund", role: "Principal", from: 2019 }],
+    education: [{ school: "London Business School", degree: "MBA", from: 2017, to: 2019 }],
+    expertise: ["consumer", "electronics manufacturing", "venture"], knows: ["rahul"],
+  },
+  {
+    id: "aman", name: "Aman Verma", headline: "Ex-Tata Motors strategy; now auto-sector consultant", city: "Pune", tie: "professional",
+    howMet: "Auto Expo 2025", lastSpoke: "2025-04-09",
+    career: [{ org: "Tata Motors", role: "Manager, Corporate Strategy", from: 2009, to: 2018 }, { org: "Independent", role: "Auto-sector consultant", from: 2018 }],
+    education: [{ school: "IIT Delhi", degree: "B.Tech Mechanical", from: 2005, to: 2009 }],
+    expertise: ["autos", "ev", "tata group"], knows: ["gautam"],
+  },
+);
+
 export function contactById(id: string) {
   return CONTACTS.find((c) => c.id === id);
 }
