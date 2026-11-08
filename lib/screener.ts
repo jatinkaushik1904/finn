@@ -60,10 +60,17 @@ export async function fundamentals(symbolIn: string): Promise<Fundamentals> {
   let { url, html } = await fetchPage(symbol, true);
   let $ = cheerio.load(html);
   let basis: Fundamentals["basis"] = "consolidated";
-  if (Object.keys(parseTable($, "quarters").rows).length === 0) {
-    ({ url, html } = await fetchPage(symbol, false));
-    $ = cheerio.load(html);
-    basis = "standalone";
+  // Banks report, guide and get judged on standalone numbers (consolidated folds in insurance and
+  // AMC subsidiaries, which wrecks NII and margins). Everyone else: consolidated when available.
+  const isBank = /\bbank/i.test($('a[title="Industry"]').first().text());
+  if (isBank || Object.keys(parseTable($, "quarters").rows).length === 0) {
+    const alt = await fetchPage(symbol, false).catch(() => null);
+    const $alt = alt ? cheerio.load(alt.html) : null;
+    if (alt && $alt && Object.keys(parseTable($alt, "quarters").rows).length > 0) {
+      ({ url, html } = alt);
+      $ = $alt;
+      basis = "standalone";
+    }
   }
   const ratios: Record<string, string> = {};
   $("#top-ratios li").each((_, li) => {
@@ -104,6 +111,12 @@ export async function fundamentals(symbolIn: string): Promise<Fundamentals> {
   };
 }
 
+// Screener lays banks/NBFCs out differently ("Financing Profit" instead of "Operating Profit").
+export function isFinancialCo(f: Fundamentals) {
+  return !!(row(f.quarters, "Financing Profit") || row(f.annual, "Financing Profit")) ||
+    /\b(bank|nbfc|non banking|housing finance)/i.test(f.industry ?? "");
+}
+
 // Pick a row by any of several candidate labels (banks/NBFCs use different names).
 export function row(t: Table, ...names: string[]): (number | null)[] | undefined {
   for (const n of names) {
@@ -134,7 +147,10 @@ export function headline(f: Fundamentals): Headline | null {
   const n = q.headers.length;
   if (n < 5) return null;
   const rev = row(q, "Sales", "Revenue");
-  const op = row(q, "Operating Profit", "Financing Profit");
+  const fin = isFinancialCo(f);
+  // Lenders: EBITDA is meaningless; net interest income (interest earned − interest expended) is the line that matters.
+  const intExp = row(q, "Interest");
+  const op = fin ? rev?.map((x, j) => (x != null && intExp?.[j] != null ? x - (intExp[j] as number) : null)) : row(q, "Operating Profit");
   const pbt = row(q, "Profit before tax");
   const pat = row(q, "Net Profit");
   const i = n - 1;
@@ -148,7 +164,7 @@ export function headline(f: Fundamentals): Headline | null {
     period: q.headers[i],
     prevPeriod: q.headers[i - 1],
     yoyPeriod: q.headers[i - 4],
-    ebitdaLabel: row(q, "Operating Profit") ? "EBITDA" : "Pre-provision profit",
-    lines: [mk("Revenue", rev), mk(row(q, "Operating Profit") ? "EBITDA" : "PPOP", op), mk("PBT", pbt), mk("PAT", pat)],
+    ebitdaLabel: fin ? "NII" : "EBITDA",
+    lines: [mk(fin ? "Interest earned" : "Revenue", rev), mk(fin ? "NII" : "EBITDA", op), mk("PBT", pbt), mk("PAT", pat)],
   };
 }

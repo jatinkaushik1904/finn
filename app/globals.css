@@ -1,17 +1,36 @@
 @import "tailwindcss";
 
+/* Design tokens. Every color in the UI comes from here (light + dark). */
 :root {
-  --bg: #f6f5f1; --card: #ffffff; --ink: #16161a; --mute: #6b6b73; --line: #e6e4dd;
-  --accent: #3b5bdb; --up: #1f8a5b; --down: #c2412d;
+  color-scheme: light;
+  --bg: #f6f5f1; --card: #ffffff; --ink: #16161a; --mute: #63636b; --line: #e4e2da;
+  --accent: #3b5bdb; --up: #1a7f52; --down: #c0392b; --warn: #9a5b00;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #0e0f12; --card: #17181d; --ink: #ececf0; --mute: #8d8e98; --line: #262830; --accent: #8ea2ff; --up: #4cc38a; --down: #ff7b66; }
+  :root {
+    color-scheme: dark;
+    --bg: #0e0f12; --card: #17181d; --ink: #ececf0; --mute: #9596a1; --line: #272932;
+    --accent: #8ea2ff; --up: #4cc38a; --down: #ff7b66; --warn: #f0b354;
+  }
 }
 @theme inline {
   --color-bg: var(--bg); --color-card: var(--card); --color-ink: var(--ink); --color-mute: var(--mute);
-  --color-line: var(--line); --color-accent: var(--accent); --color-up: var(--up); --color-down: var(--down);
+  --color-line: var(--line); --color-accent: var(--accent); --color-up: var(--up); --color-down: var(--down); --color-warn: var(--warn);
   --font-sans: var(--font-geist-sans);
 }
+
 html, body { background: var(--bg); color: var(--ink); }
-body { font-family: var(--font-sans), system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body { font-family: var(--font-sans), system-ui, sans-serif; -webkit-font-smoothing: antialiased; overscroll-behavior-y: none; }
+button, a, input { touch-action: manipulation; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
 input[type="range"] { accent-color: var(--accent); }
+
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@keyframes sheet-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.sheet { animation: sheet-up 180ms ease-out; }
+.scrim { animation: fade-in 150ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .sheet, .scrim { animation: none; } }

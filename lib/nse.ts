@@ -112,9 +112,25 @@ export async function pdfText(url: string, maxPages = 40): Promise<string> {
     });
     if (!r.ok) throw new Error("pdf " + r.status);
     const buf = new Uint8Array(await r.arrayBuffer());
-    const { extractText, getDocumentProxy } = await import("unpdf");
+    if (buf.length > 40 * 1024 * 1024) throw new Error("pdf too large");
+    const { getDocumentProxy } = await import("unpdf");
     const doc = await getDocumentProxy(buf);
-    const { text } = await extractText(doc, { mergePages: false });
-    return (text as string[]).slice(0, maxPages).join("\n");
+    // Parse only the pages we will read (an annual report can run to 400 pages).
+    const pages: string[] = [];
+    try {
+      for (let i = 1; i <= Math.min(doc.numPages, maxPages); i++) {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        pages.push(
+          (content.items as { str?: string; hasEOL?: boolean }[])
+            .filter((it) => it.str != null)
+            .map((it) => it.str + (it.hasEOL ? "\n" : ""))
+            .join(""),
+        );
+      }
+    } finally {
+      doc.destroy().catch(() => {});
+    }
+    return pages.join("\n");
   });
 }
