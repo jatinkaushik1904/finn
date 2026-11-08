@@ -14,7 +14,7 @@ Here is my submission for the FINN build challenge.
 FINN is a mobile web app with three tabs: Brief, Ask and People.
 
 - **Brief (Push).** Brief reads every NSE filing across an 18-stock portfolio for the time window you choose. It ranks the filings and folds away the routine ones, so you see "3 things worth your time" rather than 48 rows. Each type of card does something specific:
-  - **Results:** Revenue, EBITDA, PBT and PAT, compared with last quarter and the same quarter last year.
+  - **Results:** Revenue, EBITDA, PBT and PAT, compared with last quarter and the same quarter last year. The numbers are read from the results filing itself, with the arithmetic done in code and cross-checked against screener.in.
   - **Management change:** the appointee's profile, taken from the filing's own SEBI-mandated profile annexure, plus who in your network worked or studied with them.
   - **M&A, capex and litigation:** the person to call and why.
 
@@ -38,7 +38,7 @@ FINN is a mobile web app with three tabs: Brief, Ask and People.
 
 **Left out on purpose**
 
-- Native push notifications and logins.
+- Push to a closed app, which needs a database of subscribers. Instead, a weekday after-close digest goes to Telegram or Slack, and the open app raises device notifications. Logins.
 - Live LinkedIn enrichment.
 - Saved fallback copies for every company. Only the brief and the five demo research companies have them; any other company needs screener.in to be reachable.
 - BSE's data API, which blocks scripts; NSE covers the same filings.

@@ -123,6 +123,8 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
   const [showSettings, setShowSettings] = useState(false);
   const slow = useRef(false);
   const manual = useRef(false);
+  // While the app is open it keeps watching: re-check every 10 minutes (alerts fire on change).
+  useEffect(() => { const t = setInterval(() => setNonce((n) => n + 1), 10 * 60_000); return () => clearInterval(t); }, []);
   const [widened, setWidened] = useState<number | null>(null);
 
   const save = (n: Settings, debounce = false) => {
@@ -149,7 +151,7 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
           got = j as Brief;
           if (got.items.some((i) => i.priority >= MATERIAL)) break;
         }
-        if (got) { setB(got); setWidened((got.settings?.hours ?? s.hours) !== s.hours ? s.hours : null); }
+        if (got) { setB(got); setWidened((got.settings?.hours ?? s.hours) !== s.hours ? s.hours : null); notifyNew(got.items); }
       } catch {
         if (!ac.signal.aborted) setErr("Couldn't reach FINN's server.");
       } finally {
@@ -208,7 +210,8 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
               );
             })}
           </div>
-          <p className="mt-3 text-[11px] leading-snug text-mute">Moves are checked on each holding&apos;s latest NSE end-of-day bar. Saved on this device.</p>
+          <NotifyToggle />
+          <p className="mt-3 text-[11px] leading-snug text-mute">Moves are checked on each holding&apos;s latest NSE end-of-day bar. Saved on this device. A daily after-close digest can also go to Telegram or Slack (see README).</p>
         </div>
       )}
 
@@ -326,6 +329,34 @@ function mergeLeads<T extends LeadLike>(ls: T[]): (T & { alsoVia?: string })[] {
   return out;
 }
 
+// System notification for material items this device hasn't seen yet (needs the investor's permission).
+async function notifyNew(items: Item[]) {
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const seen = new Set<string>(JSON.parse(localStorage.getItem("finn.seen") || "[]"));
+    const fresh = items.filter((i) => i.priority >= MATERIAL && !seen.has(i.id));
+    localStorage.setItem("finn.seen", JSON.stringify([...seen, ...fresh.map((i) => i.id)].slice(-400)));
+    if (!fresh.length) return;
+    const title = `${fresh.length} new thing${fresh.length > 1 ? "s" : ""} worth your time`;
+    const body = fresh.slice(0, 3).map((i) => `${i.company} · ${i.label}`).join("\n");
+    const reg = await navigator.serviceWorker?.register("/sw.js");
+    if (reg) await reg.showNotification(title, { body, icon: "/icon-192.png", tag: "finn-brief" });
+    else new Notification(title, { body });
+  } catch {}
+}
+
+function NotifyToggle() {
+  const [st, setSt] = useState("default");
+  useEffect(() => { try { setSt(typeof Notification === "undefined" ? "unsupported" : Notification.permission); } catch { setSt("unsupported"); } }, []);
+  const enable = async () => {
+    try { await navigator.serviceWorker?.register("/sw.js"); setSt(await Notification.requestPermission()); } catch { setSt("unsupported"); }
+  };
+  if (st === "unsupported") return <p className="mt-3 text-[11px] text-mute">This browser can&apos;t show notifications — add FINN to your home screen first.</p>;
+  return st === "granted"
+    ? <p className="mt-3 text-xs text-up">Notifications on — FINN pings this device when something material lands.</p>
+    : <button onClick={enable} className="mt-3 h-10 w-full rounded-full border border-line text-xs font-medium">{st === "denied" ? "Notifications blocked in browser settings" : "Notify me on this device"}</button>;
+}
+
 const first = (n: string) => n.split(" ")[0];
 function LeadRow({ l, onPerson, verb = "Call" }: { l: LeadLike & { alsoVia?: string }; onPerson: (id: string) => void; verb?: string }) {
   return (
@@ -367,7 +398,9 @@ function Card({ it, rank, onCompany, onPerson }: { it: Item; rank: number; onCom
       {it.results && (
         <div className="mt-3">
           <ResultsTable period={it.results.period} prevPeriod={it.results.prevPeriod} yoyPeriod={it.results.yoyPeriod} lines={it.results.lines ?? []}
-            ebitdaNote={it.results.ebitdaLabel === "EBITDA" || !it.results.ebitdaLabel ? "EBITDA = operating profit" : `PPOP = ${it.results.ebitdaLabel.toLowerCase()}`}
+            ebitdaNote={(it.results as { from?: string; basis?: string; check?: string }).from === "filing"
+              ? `From the results filing (${(it.results as { basis?: string }).basis ?? "consolidated"}) · EBITDA = PBT + finance cost + D&A − other income${(it.results as { check?: string }).check ? ` · ${(it.results as { check?: string }).check}` : ""}`
+              : it.results.ebitdaLabel === "EBITDA" || !it.results.ebitdaLabel ? "From reported tables · EBITDA = operating profit" : "From reported tables · NII = interest earned − interest expended"}
             source={it.results.source} />
         </div>
       )}

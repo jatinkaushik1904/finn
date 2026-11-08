@@ -5,6 +5,7 @@ import { CONTACTS } from "@/data/network";
 import { announcements, eod, pdfText, pool, Bar, RawAnn } from "./nse";
 import { assess, CATEGORY_LABEL, Category, classify, isGeneric, needsFiling, sentences } from "./classify";
 import { fundamentals, headline, Headline } from "./screener";
+import { resultsFromFiling } from "./results";
 import { investorOverlap, leadsForCompany, monthsSince, orgsInText, overlapsForPerson, PersonProfile, resolveOrg } from "./network";
 import { llmJSON } from "./llm";
 import { cached, hash } from "./cache";
@@ -25,7 +26,7 @@ export type Related = { id: string; time: string; label: string; summary: string
 export type Item = {
   id: string; symbol: string; company: string; time: string; category: Category; label: string;
   priority: number; summary: string; url: string; desc: string;
-  results?: Headline & { source: string };
+  results?: Headline & { source: string; from?: "filing" | "screener"; basis?: string; check?: string };
   person?: {
     name: string; role?: string; profile: PersonProfile; bio?: string;
     overlaps: { id: string; name: string; kind: string; why: string; strength: number }[];
@@ -412,9 +413,10 @@ async function liveCore(hours: number): Promise<Core> {
   await Promise.race([
     Promise.all([
       pool(resultsFor, 3, async (w) => {
-        const f = await fundamentals(w.symbol);
-        const h = headline(f);
-        if (h) w.results = { ...h, source: f.source };
+        const f = await fundamentals(w.symbol).catch(() => null);
+        const h = f ? headline(f) : null;
+        const tables = h && f ? { ...h, source: f.source } : null;
+        w.results = (await resultsFromFiling(w.url, tables, Math.max(3000, t0 + T.enrich - Date.now() - 500))) ?? tables ?? undefined;
       }),
       pool(people, 3, async (w) => {
         const company = PORTFOLIO.find((c) => c.symbol === w.symbol)!;
@@ -575,7 +577,7 @@ async function core(hours: number): Promise<Core> {
     }
   };
   // Only fully live results are cached; a degraded brief retries on the next request.
-  return cached(`brief-core:v3:${hours}`, CORE_TTL, build, (c) => c.source === "live");
+  return cached(`brief-core:v6:${hours}`, CORE_TTL, build, (c) => c.source === "live");
 }
 
 export async function buildBrief(input: Partial<Settings>): Promise<Brief> {
