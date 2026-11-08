@@ -1,26 +1,17 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #f6f5f1; --card: #ffffff; --ink: #16161a; --mute: #6b6b73; --line: #e6e4dd;
+  --accent: #3b5bdb; --up: #1f8a5b; --down: #c2412d;
 }
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  :root { --bg: #0e0f12; --card: #17181d; --ink: #ececf0; --mute: #8d8e98; --line: #262830; --accent: #8ea2ff; --up: #4cc38a; --down: #ff7b66; }
 }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@theme inline {
+  --color-bg: var(--bg); --color-card: var(--card); --color-ink: var(--ink); --color-mute: var(--mute);
+  --color-line: var(--line); --color-accent: var(--accent); --color-up: var(--up); --color-down: var(--down);
+  --font-sans: var(--font-geist-sans);
 }
+html, body { background: var(--bg); color: var(--ink); }
+body { font-family: var(--font-sans), system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+input[type="range"] { accent-color: var(--accent); }
