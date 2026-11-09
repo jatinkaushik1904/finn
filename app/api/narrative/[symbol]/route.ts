@@ -2,7 +2,7 @@ import { narrative } from "@/lib/research";
 import { snapshot } from "@/lib/snapshot";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 60;
 
 export async function GET(_: Request, { params }: { params: Promise<{ symbol: string }> }) {
   const { symbol } = await params;
