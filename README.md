@@ -36,7 +36,7 @@ Without an LLM key everything still runs: classification, alerts, research table
 
 **Deploy:** `npx vercel deploy --prod`, then set the env vars from `.env.example`. For closed-app alerts run `scripts/setup-push.sh` once (push keys + a private Blob store for subscriptions). `GET /api/health?llm=1` shows which upstreams the deployment can reach, from which region.
 
-**Refresh the shipped cache** (optional, before a deploy): `FINN_SEED_RECORD=data/seed npm run dev`, then `node scripts/warm.mjs http://localhost:3000`.
+**Refresh the shipped cache** (optional, before a deploy): `FINN_SEED_RECORD=data/seed FINN_SEED_DEEP=1 npm run dev`, then `node scripts/warm.mjs http://localhost:3000`. Check it with `node scripts/cold-check.mjs <url>` against a server with an empty cache: it passes only if every digest window and every warmed company answers without a single model call.
 
 ## Architecture
 
@@ -68,7 +68,7 @@ Without an LLM key everything still runs: classification, alerts, research table
 **Data pipelines.**
 - *Filings and prices:* NSE's JSON API (filings list per symbol, end-of-day bars). NSE moved hosts from `nseindia.com` to `nseindia.in` during the build week; the origin is one constant (`NSE_ORIGIN`) and `/api/health` probes it.
 - *Fundamentals:* screener.in tables plus its links to concall transcripts and annual reports. Segment results, capex and (for lenders) advances/deposits come from the results filings themselves.
-- *Refresh and storage:* filings list 2h, prices 6h, screener 12h, an assembled brief 10 min. Anything immutable (PDF text, model answers, checked results) is cached for good and shipped as a gzipped seed (about 800 entries, 6.5 MB), so a filing is never read or paid for twice. Measured on a production build with an empty cache: the brief in 1–3 s, a warmed company's research, verdicts and management sheet in under a second, and no model calls at all.
+- *Refresh and storage:* filings list 2h, prices 6h, screener 12h, an assembled brief 10 min. Anything immutable (PDF text, model answers, checked results) is cached for good and shipped as a gzipped seed (about 900 entries, 7 MB), so a filing is never read or paid for twice. Measured on a production build with an empty cache: the brief in 1–3 s, a warmed company's research, verdicts and management sheet in under a second, and no model calls at all.
 - *Linking a name in a filing to a person in the network:* (1) the profile's employers and schools are copied from the filing; (2) each is resolved to a canonical company through an alias table (`data/universe.ts`), unknown ones by normalised name; (3) each is compared with every contact's career and education by **overlapping years**: same employer, same years = "worked with"; same employer, different years = "knows the team they came from"; same school and years = "studied with". (4) If the contact who overlaps is cold, the graph of who-probably-knows-whom names a warmer route. In production I'd add an identifier per person (DIN for directors) and a one-tap human confirmation before a match is shown as fact.
 
 **Data security and privacy.**
@@ -112,4 +112,4 @@ Without an LLM key everything still runs: classification, alerts, research table
 - `lib/` pipelines and logic: `nse` `screener` `pdf` (ingestion) · `classify` `brief` `results` `person` `push` (Push) · `research` `people` (Pull) · `network` (matching, shared by server and browser) · `llm` `cache` (routing, limits, caching)
 - `components/` + `app/page.tsx` the UI · `components/net*.ts` the on-device network
 - `data/` portfolio, synthetic network, `snapshot/` fallbacks, `seed/` pre-read cache
-- `app/api/` routes · `scripts/` warm-up and push setup · `.github/workflows/pulse.yml` the 15-minute heartbeat
+- `app/api/` routes · `scripts/` warm-up, cold-start check and push setup · `.github/workflows/pulse.yml` the 15-minute heartbeat

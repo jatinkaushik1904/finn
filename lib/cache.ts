@@ -49,7 +49,7 @@ const recorded = new Set<string>();
 // PDF text, model answers — are touched and land in the seed too. Costs no model calls when
 // those pieces are already cached locally.
 const DEEP = !!RECORD && process.env.FINN_SEED_DEEP === "1";
-const ASSEMBLED = /^(results|narr|people|filed):/;
+const ASSEMBLED = /^(results|narr|people|filed|brief-core):/;
 const rebuilt = new Set<string>();
 async function record(k: string, e: Entry) {
   if (!RECORD || recorded.has(k)) return;
