@@ -12,12 +12,13 @@ export const maxDuration = 60;
 
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-async function probe(name: string, fn: () => Promise<string>) {
+// `optional`: FINN does not depend on it (kept as a signal of how the upstream treats this IP).
+async function probe(name: string, fn: () => Promise<string>, optional?: string) {
   const t = Date.now();
   try {
     return { name, ok: true, detail: await fn(), ms: Date.now() - t };
   } catch (e) {
-    return { name, ok: false, detail: (e as Error).message.slice(0, 160), ms: Date.now() - t };
+    return { name, ok: false, ...(optional ? { optional: true } : {}), detail: `${(e as Error).message.slice(0, 160)}${optional ? ` — ${optional}` : ""}`, ms: Date.now() - t };
   }
 }
 
@@ -39,7 +40,7 @@ export async function GET(req: NextRequest) {
   const withLLM = req.nextUrl.searchParams.get("llm") === "1";
   const to = new Date(), from = new Date(Date.now() - 10 * 86400_000);
   const probes = await Promise.all([
-    probe("nse.home", () => get(`${NSE_ORIGIN}/`, { Accept: "text/html" })),
+    probe("nse.home", () => get(`${NSE_ORIGIN}/`, { Accept: "text/html" }), "not needed: the JSON API below answers without the site's cookie session"),
     probe("nse.api.announcements", async () => `${(await announcements("TITAN", from, to)).length} filings`),
     probe("nse.api.eod", async () => `${(await eod("TITAN", 30)).length} bars`),
     probe("nse.archive.bhavcopy", () => get(`${NSE_ARCHIVES}/products/content/sec_bhavdata_full_${lastWeekday()}.csv`)),

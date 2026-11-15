@@ -32,7 +32,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tally = (vs) => Object.entries((vs ?? []).reduce((a, v) => ((a[v.verdict] = (a[v.verdict] ?? 0) + 1), a), {})).map(([k, n]) => `${n} ${k}`).join(", ") || "no verdicts";
 
 const h = await get("/api/health?llm=1");
-console.log(`health ${h.s}s`, (h.j.probes ?? []).map((p) => `${p.name}:${p.ok ? "ok" : "FAIL"}`).join(" "));
+console.log(`health ${h.s}s`, (h.j.probes ?? []).map((p) => `${p.name}:${p.ok ? "ok" : p.optional ? "blocked(optional)" : "FAIL"}`).join(" "));
 
 if (!only) for (const hours of [24, 72, 168, 720]) {
   for (let i = 0; i < 10; i++) {

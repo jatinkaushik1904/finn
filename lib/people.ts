@@ -46,6 +46,7 @@ const trim = (s: string, n: number) => (s.length > n ? s.slice(0, n).replace(/\s
 const tidyTitle = (t: string, company: string) => {
   const co = company.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 3)[0] ?? "\u0000";
   return (t || "")
+    .replace(/^[\s–—,:-]+/, "")
     .replace(/\s*[–—,-]\s*([^–—,]*)$/, (m, tail: string) => (tail.toLowerCase().includes(co) || /\b(limited|ltd)\.?$/i.test(tail.trim()) ? "" : m))
     .replace(/\b(And|Of|The|For|In)\b/g, (w) => w.toLowerCase())
     .trim();
@@ -210,6 +211,6 @@ export async function people(symbolIn: string, budgetMs = 42_000): Promise<Meeti
   const r = await research(symbolIn);
   const anns = await recentAnnouncements(r.symbol).catch(() => [] as RawAnn[]);
   const latest = anns.map((a) => a.sort_date).sort().at(-1) ?? "";
-  const key = `people:v5:${r.symbol}:${latest.slice(0, 10)}:${r.quarters.periods.at(-1)}:${r.concalls.find((c) => c.transcript)?.transcript ?? ""}`;
+  const key = `people:v6:${r.symbol}:${latest.slice(0, 10)}:${r.quarters.periods.at(-1)}:${r.concalls.find((c) => c.transcript)?.transcript ?? ""}`;
   return cached(key, DAY, () => build(r.symbol, Math.max(8000, budgetMs - (Date.now() - t0))), (m) => !m.partial, { immutable: true });
 }

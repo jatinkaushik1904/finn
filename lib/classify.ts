@@ -155,7 +155,7 @@ export function cleanSummary(text: string, company: string) {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-const GENERIC = /^(general updates?|updates?|change in (management|director\(s\)( of the company)?|directors?)|resignation( of director\/kmp\/smp| of director of the company)?|appointment|retirement|credit rating|bagging\/receiving of orders\/contracts|action\(s\) (initiated|taken) or orders passed|other restructuring|acquisition|corporate insolvency resolution process|outcome of (the )?board meeting( held .{0,60})?|press release|a press release dated [^,]{4,30}\.?|intimation|disclosure|issue of securities|media statement|please find attached a media statement issued by the company)\.?$/i;
+const GENERIC = /^(general updates?|updates?|change in (management|director\(s\)( of the company)?|directors?)|resignation( of director\/kmp\/smp| of director of the company)?|appointment|retirement|credit rating|bagging\/receiving of orders\/contracts|action\(s\) (initiated|taken) or orders passed( against the company)?|other restructuring|acquisition|corporate insolvency resolution process|outcome of (the )?board meeting( held .{0,60})?|press release|a press release dated [^,]{4,30}\.?|intimation|disclosure|issue of securities|media statement|please find attached a media statement issued by the company)\.?$/i;
 export function isGeneric(desc: string, summary: string) {
   const s = stripBoilerplate(summary).replace(/\s+/g, " ").trim();
   return s.length < 12 || GENERIC.test(s) || s.toLowerCase() === desc.toLowerCase().trim();
