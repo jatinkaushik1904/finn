@@ -7,7 +7,7 @@ Here is my submission for the FINN build challenge.
 
 - **Prototype** (open on a phone): https://finn-psi-one.vercel.app
 - **Repository:** https://github.com/jatinkaushik1904/finn
-- **AI build history:** attached (`AI_BUILD_HISTORY.html`), the full Claude Code session: every prompt I gave, every reply, and each action it took.
+- **AI build history:** attached. `AI_BUILD_HISTORY.html` is the readable edition (my prompts with spelling corrected, routine ones left out); `AI_BUILD_HISTORY_FULL.html` is the complete, unedited session.
 
 **What I built**
 
@@ -51,4 +51,4 @@ FINN is a phone-first web app with one idea: an investor needs a brief, not a fe
 
 Thank you for your time.
 
-[Your name]
+Jatin Kaushik
