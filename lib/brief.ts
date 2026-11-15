@@ -5,9 +5,9 @@ import { CONTACTS } from "@/data/network";
 import { announcements, eod, pdfText, pool, Bar, RawAnn } from "./nse";
 import { assess, CATEGORY_LABEL, Category, classify, isGeneric, needsFiling, sentences } from "./classify";
 import { fundamentals, headline, Headline } from "./screener";
-import { resultsFromFiling } from "./results";
-import { investorOverlap, leadsForCompany, monthsSince, orgsInText, overlapsForPerson, PersonProfile, resolveOrg } from "./network";
-import { llmJSON } from "./llm";
+import { FilingHeadline, rankResultsDocs, resultsFromFiling, screenerContext } from "./results";
+import { investorOverlap, leadsForCompany, monthsSince, overlapsForPerson, PersonProfile, pickLeads, questionFor, resolveOrg } from "./network";
+import { extractPerson, personKey, profileSection } from "./person";
 import { cached, hash } from "./cache";
 
 // The PUSH pipeline. Two layers:
@@ -21,16 +21,19 @@ import { cached, hash } from "./cache";
 export type Settings = { hours: number; volX: number; movePct: number; cares: Category[] };
 export const DEFAULT_SETTINGS: Settings = { hours: 24, volX: 2, movePct: 4, cares: ["results", "M&A", "management_change", "litigation"] };
 
-export type LeadLite = { id: string; name: string; headline: string; why: string; via?: string; score: number; ask?: string };
+export type LeadLite = { id: string; name: string; headline: string; why: string; via?: string; score: number; ask?: string; relation?: string };
 export type Related = { id: string; time: string; label: string; summary: string; url: string };
 export type Item = {
   id: string; symbol: string; company: string; time: string; category: Category; label: string;
   priority: number; summary: string; url: string; desc: string;
-  results?: Headline & { source: string; from?: "filing" | "screener"; basis?: string; check?: string };
+  // Headline numbers. `from: "filing"` = read from the results PDF itself and checked; "screener" =
+  // the reported tables, shown while the filing is being read (`pending`) or when it can't be used.
+  results?: Headline & { source: string } & Partial<Pick<FilingHeadline, "from" | "basis" | "check" | "note" | "formula" | "page" | "method" | "unit" | "pending" | "reason">>;
   person?: {
     name: string; role?: string; profile: PersonProfile; bio?: string;
     overlaps: { id: string; name: string; kind: string; why: string; strength: number }[];
-    you?: string | null; extractedBy: string; direction?: "joining" | "leaving";
+    you?: string | null; extractedBy: string; direction?: "joining" | "leaving" | "continuing";
+    profileUrl?: string; // the filing the profile was read from (may be an earlier filing on the same person)
   };
   leads?: LeadLite[];
   signals?: string[];
@@ -60,7 +63,10 @@ const CARES_BOOST = 12;
 const MOVED_BOOST = 8;
 const EOD_DAYS = 80; // ~55 sessions: a full 20-session baseline even for the first day of a 30-day window
 const IST = 5.5 * 3600_000;
-const T = { fetch: 22_000, filings: 34_000, enrich: 46_000, hard: 52_000 }; // ms from start; Vercel cap is 60s
+// ms from start. The exchange answers in 1–3s when healthy; these are ceilings. Enrichment that
+// isn't done by `enrich` keeps running after the response (results cards say "reading the
+// filing" and fill in on the next load). Vercel's cap is 60s.
+const T = { fetch: 14_000, filings: 22_000, enrich: 30_000, hard: 44_000 };
 
 const parseDate = (s: string) => new Date(s.replace(" ", "T") + "+05:30");
 const istDay = (d: Date) => new Date(d.getTime() + IST).toISOString().slice(0, 10);
@@ -152,106 +158,28 @@ function marketNote(bars: Record<string, Bar[]>): Brief["market"] {
 
 // ---------------------------------------------------------------- people in filings
 
-type Extract = {
-  name: string; role: string; joining_or_leaving: string; bio: string;
-  employers: { org: string; role?: string; from?: number; to?: number }[];
-  education: { school: string; from?: number; to?: number }[];
-};
-const HONORIFIC = /^(?:mr|ms|mrs|dr|shri|smt|sh|prof)\.?\s+/i;
-const NOT_PERSON = /\b(llp|limited|ltd|chartered|accountants|& co|company|bank|board|committee|auditors?|trust|exchange|government)\b/i;
-const NOT_EMPLOYER = /^(sebi|rbi|reserve bank|nse|bse|national stock exchange|mca|ministry|stock exchange|securities and exchange board|registrar of companies)/i;
-const PERSON_SYSTEM =
-  "You extract facts from Indian stock-exchange filings about management changes. Use ONLY the document text. Never add outside knowledge. If a field is absent from the document, return an empty string or an empty list.";
-
-const cleanName = (s?: string) => (s || "").replace(HONORIFIC, "").replace(/\s*\(DIN[^)]*\)/i, "").replace(/\s+/g, " ").trim();
-const plausibleName = (n: string, corpus: string) => {
-  const parts = n.split(" ").filter(Boolean);
-  const last = parts[parts.length - 1]?.replace(/[^A-Za-z]/g, "");
-  return parts.length >= 2 && parts.length <= 5 && !NOT_PERSON.test(n) && !!last && last.length >= 2 && new RegExp(`\\b${last}\\b`, "i").test(corpus);
-};
-// A bio is kept only if it is (nearly) all words from the filing itself.
-const grounded = (bio: string, corpus: string) => {
-  const words = (bio.toLowerCase().match(/[a-z]{5,}/g) ?? []);
-  if (!words.length) return false;
-  const c = corpus.toLowerCase();
-  return words.filter((w) => c.includes(w)).length / words.length >= 0.75;
-};
-const profileSection = (doc: string) => {
-  const i = doc.search(/brief profile|profile of (?:the )?(?:director|appointee|mr|ms)|brief resume|background of/i);
-  return i >= 0 ? doc.slice(i, i + 2000) : "";
-};
-
-// PRIVACY: the model sees only the public exchange filing (and NSE's one-line summary of it).
-// Contact/network data never leaves this process — overlaps are matched locally afterwards.
-async function personFromFiling(it: Item, doc: string | undefined, company: Company, deadline: number): Promise<Item["person"] | undefined> {
-  const filing = (doc ?? "").replace(/\s+/g, " ").slice(0, 12000);
-  const ai = filing
-    ? await llmJSON<Extract>(
-        "fast",
-        PERSON_SYSTEM,
-        `The filing line this card is about: "${it.summary}"\n\nReturn JSON {"name":"","role":"","joining_or_leaving":"joining|leaving","bio":"<=40 words, only from the document's brief profile; empty if the document has no profile","employers":[{"org":"","role":"","from":null,"to":null}],"education":[{"school":"","from":null,"to":null}]} for the person that line is about (if several, the most senior). Employers and education only as stated in the document.\n\nDOCUMENT:\n${filing}`,
-        900,
-        { timeoutMs: Math.max(3000, deadline - Date.now()) },
-      )
-    : null;
-  const corpus = `${it.summary} ${filing}`;
-  const rx = it.summary.match(/(?:Mr|Ms|Mrs|Dr|Shri|Smt)\.?\s+([A-Z][A-Za-z.'’]*(?:\s+[A-Z][A-Za-z.'’]*){1,3})/);
-  const aiName = cleanName(ai?.name);
-  const name = plausibleName(aiName, corpus) ? aiName : rx && plausibleName(cleanName(rx[1]), corpus) ? cleanName(rx[1]) : "";
-  if (!name) return undefined;
-  const usedAI = !!ai && name === aiName;
-  const leaving = /leav|retir|resign|ceas|superannu|vacat|cessation/i.test(usedAI ? ai!.joining_or_leaving || it.summary : it.summary);
-  const prof = profileSection(filing);
-  const isCo = (org: string) => resolveOrg(org)?.symbol === company.symbol;
-  let employers = (usedAI ? ai!.employers ?? [] : [])
-    .filter((e) => e?.org && !NOT_EMPLOYER.test(e.org.trim()))
-    .map((e) => ({ org: e.org, role: e.role || undefined, from: Number(e.from) || undefined, to: Number(e.to) || undefined }));
-  if (!employers.length && prof) employers = orgsInText(prof).filter((o) => !NOT_EMPLOYER.test(o.name)).map((o) => ({ org: o.name, role: undefined, from: undefined, to: undefined }));
-  // Joining: the company itself is where they are going, not shared history. Leaving: it is.
-  if (leaving) { if (!employers.some((e) => isCo(e.org))) employers.push({ org: company.name, role: undefined, from: undefined, to: undefined }); }
-  else employers = employers.filter((e) => !isCo(e.org));
-  const education = (usedAI ? ai!.education ?? [] : [])
-    .filter((e) => e?.school)
-    .map((e) => ({ school: e.school, from: Number(e.from) || undefined, to: Number(e.to) || undefined }));
-  if (!education.length && prof)
-    for (const m of prof.match(/\b(IIT [A-Z][a-z]+|IIM [A-Z][a-z]+|XLRI|ISB|SRCC|NMIMS|BITS Pilani|ICAI|Harvard|Wharton|INSEAD|Stanford)\b/g) ?? []) education.push({ school: m, from: undefined, to: undefined });
-  const role = usedAI ? ai!.role || undefined : undefined;
-  const profile: PersonProfile = { name, role, employers, education };
-  const overlaps = overlapsForPerson(profile, leaving ? undefined : company.name)
+// The person behind a management-change card (lib/person.ts reads the filing), then who in the
+// network overlaps with them — matched here by rules; contact data never reaches a model.
+async function personFromFiling(it: Item, doc: string | undefined, company: Company, deadline: number, docUrl?: string): Promise<Item["person"] | undefined> {
+  const x = await extractPerson(it.summary, doc, company, deadline);
+  if (!x) return undefined;
+  const profile: PersonProfile = { name: x.name, role: x.role, employers: x.employers, education: x.education };
+  const overlaps = overlapsForPerson(profile, x.direction === "leaving" ? undefined : company.name)
     .slice(0, 3)
     .map((o) => ({ id: o.contact.id, name: o.contact.name, kind: o.kind, why: o.why, strength: o.strength }));
-  const bio = usedAI && ai!.bio && grounded(ai!.bio, filing) ? ai!.bio : undefined;
   return {
-    name, role, profile, bio, overlaps, you: investorOverlap(profile), direction: leaving ? "leaving" : "joining",
-    extractedBy: usedAI ? "LLM (fast tier) on filing PDF" : filing ? "Rules on filing PDF" : "Rules on filing summary",
+    name: x.name, role: x.role, profile, bio: x.bio, overlaps, you: investorOverlap(profile), direction: x.direction, extractedBy: x.extractedBy,
+    ...(docUrl && docUrl !== it.url ? { profileUrl: docUrl } : {}),
   };
 }
 
 const lite = (l: ReturnType<typeof leadsForCompany>[number]): LeadLite => ({
-  id: l.contact.id, name: l.contact.name, headline: l.contact.headline, why: l.why, via: l.via?.name, score: l.score,
+  id: l.contact.id, name: l.contact.name, headline: l.contact.headline, why: l.why, via: l.via?.name, score: l.score, relation: l.relation,
 });
-
-// The one question worth asking this person about this filing (deterministic; no contact data
-// leaves the server). Insiders get "why", peers get "are you seeing it too".
-function askFor(cat: Category, relation: string, company: string): string {
-  const peer = relation === "peer" || relation === "theme";
-  const Q: Partial<Record<Category, [string, string]>> = {
-    results: ["Was this quarter's margin move mix, pricing or one-offs — and does it repeat next quarter?", `Are you seeing the same demand and cost trend that ${company} just reported?`],
-    management_change: ["Why now — and what will the new person change first?", `What's the industry read on this change at ${company}?`],
-    "M&A": ["Why this deal, what are they really paying for, and who pushed for it?", `Does this deal change how ${company} competes with you?`],
-    capex: ["Is there demand to fill this capacity — what payback are they underwriting?", "Is the industry adding capacity at the same time?"],
-    litigation: ["How material is this really, and has it happened before?", `Has this kind of order hit others in the sector, or only ${company}?`],
-    fund_raise: ["Why raise now — growth, balance sheet, or a promoter need?", "Is the sector raising money too, or is this company-specific?"],
-    credit_rating: ["What is the agency worried about that the market isn't?", "Are lenders tightening on the sector?"],
-    pledging: ["Why does the promoter need liquidity right now?", "Is promoter stress showing up anywhere else you know?"],
-  };
-  const q = Q[cat];
-  return q ? q[peer ? 1 : 0] : `Anything about ${company} the filings aren't telling me?`;
-}
 
 // ---------------------------------------------------------------- folding duplicates
 
-type Work = Item & { fp?: string; doc?: string; generic: boolean; thread?: boolean; raw: RawAnn };
+type Work = Item & { fp?: string; doc?: string; generic: boolean; thread?: boolean; raw: RawAnn; group?: Work[] };
 
 const forum = (t: string) =>
   /\bCCI\b|competition commission/i.test(t) ? "competition"
@@ -268,7 +196,13 @@ function keysFor(w: Work): string[] {
   const sum = norm(w.summary);
   if (!w.generic && sum.length > 40) k.push(`sum:${w.symbol}:${sum}`);
   if (w.category === "results") k.push(`res:${w.symbol}`);
-  if (w.category === "management_change") k.push(`mgmt:${w.symbol}:${istDay(new Date(w.time))}`);
+  if (w.category === "management_change") {
+    // One card per person: the same change runs over several filings (board approval, the
+    // regulator's nod, the effective date), but two people changing on one day are two cards.
+    // Filings that name no one are folded per day (they are that day's paperwork).
+    const who = personKey(w.summary);
+    k.push(who ? `who:${w.symbol}:${who}` : `mgmt:${w.symbol}:${istDay(new Date(w.time))}`);
+  }
   if (CLARIFY.test(t)) { k.push(`clar:${w.symbol}`); w.thread = true; }
   else if (w.category === "litigation" && forum(t)) { k.push(`lit:${w.symbol}:${forum(t)}`); w.thread = true; }
   if (w.category === "fund_raise") {
@@ -280,7 +214,7 @@ function keysFor(w: Work): string[] {
 
 function preference(w: Work) {
   let p = w.generic ? 0 : 1;
-  if (w.category === "results" && /^(outcome of board meeting|financial result)/i.test(w.desc) && /financial result/i.test(w.raw.attchmntText)) p += 2;
+  if (w.category === "results" && /^(outcome of board meeting|financial result)/i.test(w.desc)) p += 2;
   if (CLARIFY.test(`${w.desc} ${w.raw.attchmntText}`) && !/sought clarification/i.test(w.raw.attchmntText)) p += 2;
   return p;
 }
@@ -318,6 +252,7 @@ function fold(items: Work[]) {
     cands.sort((a, b) => preference(b) - preference(a) || b.base! - a.base! || b.time.localeCompare(a.time));
     const primary = cands[0];
     primary.base = max;
+    primary.group = g;
     if (g.some((w) => CLARIFY.test(`${w.desc} ${w.raw.attchmntText}`))) primary.summary = clarifySummary(g) ?? primary.summary;
     primary.related = g
       .filter((w) => w !== primary)
@@ -361,6 +296,9 @@ async function liveCore(hours: number): Promise<Core> {
     for (const a of anns) {
       if (parseDate(a.sort_date) < cutoff) continue;
       const first = assess(a.desc, a.attchmntText, c.name);
+      // A .zip/.xml attachment with a generic line is the machine-readable (XBRL) copy of a
+      // disclosure already made as a PDF: paperwork, never a card of its own.
+      if (!/\.pdf(\?|$)/i.test(a.attchmntFile ?? "") && isGeneric(a.desc, first.summary)) first.priority = Math.min(first.priority, 15);
       work.push({
         id: a.seq_id || `${c.symbol}-${a.sort_date}`, symbol: c.symbol, company: c.name, time: parseDate(a.sort_date).toISOString(),
         category: first.category, label: CATEGORY_LABEL[first.category], priority: first.priority, base: first.priority,
@@ -402,32 +340,39 @@ async function liveCore(hours: number): Promise<Core> {
     const leads = leadsForCompany(company, w.summary);
     if (!leads.length) continue;
     const n = ["M&A", "capex", "litigation", "management_change", "fund_raise"].includes(w.category) ? 2 : 1;
-    w.leads = leads.slice(0, n).map((l, i) => ({ ...lite(l), ...(i === 0 ? { ask: askFor(w.category, l.relation, company.name) } : {}) }));
+    w.leads = pickLeads(leads, n).map((l, i) => ({ ...lite(l), ...(i === 0 ? { ask: questionFor(w.category, l.relation, company.name, w.summary) } : {}) }));
     if (leads[0].relation === "inside" || leads[0].relation === "alumni") w.base = Math.min(100, w.base! + 4);
   }
   const resultsFor = could.filter((w) => w.category === "results");
   const people = could
-    .filter((w) => w.category === "management_change" && w.base! + CARES_BOOST >= MATERIAL)
+    .filter((w) => w.category === "management_change")
     .sort((a, b) => b.base! - a.base!)
-    .slice(0, 5);
+    .slice(0, 16);
   await Promise.race([
     Promise.all([
       pool(resultsFor, 3, async (w) => {
         const f = await fundamentals(w.symbol).catch(() => null);
         const h = f ? headline(f) : null;
         const tables = h && f ? { ...h, source: f.source } : null;
-        w.results = (await resultsFromFiling(w.url, tables, Math.max(3000, t0 + T.enrich - Date.now() - 500))) ?? tables ?? undefined;
+        // Every PDF of this results set (outcome letter, press release, presentation…), the
+        // statement itself first; read on the basis screener.in reports, cross-checked against it.
+        const set = [w, ...(w.group ?? []).filter((x) => x !== w && x.category === "results")];
+        const docs = rankResultsDocs(set.map((x) => ({ url: x.url, desc: x.desc, label: x.raw.attchmntText, primary: x === w })));
+        if (!docs.length) { w.results = tables ?? undefined; return; }
+        w.results = (await resultsFromFiling(docs[0], tables, Math.max(3000, t0 + T.enrich - Date.now() - 500), { candidates: docs.slice(1), ...(f ? screenerContext(f) : {}), filedAt: w.time })) ?? tables ?? undefined;
       }),
       pool(people, 3, async (w) => {
         const company = PORTFOLIO.find((c) => c.symbol === w.symbol)!;
-        w.person = await personFromFiling(w, w.doc, company, t0 + T.enrich);
+        // The filing in this thread that carries the person's profile (often not the latest one).
+        const withProfile = [w, ...(w.group ?? []).filter((x) => x !== w)].find((x) => x.doc && profileSection(x.doc.replace(/\s+/g, " ")));
+        w.person = await personFromFiling(w, (withProfile ?? w).doc, company, t0 + T.enrich, (withProfile ?? w).url);
       }),
     ]),
     until(t0 + T.enrich),
   ]);
   timings.enrich = Date.now() - t2;
 
-  const items: Item[] = work.map(({ fp: _fp, doc: _doc, generic: _g, thread: _t, raw: _r, ...it }) => ({ ...it, priority: it.base! }));
+  const items: Item[] = work.map(({ fp: _fp, doc: _doc, generic: _g, thread: _t, raw: _r, group: _grp, ...it }) => ({ ...it, priority: it.base! }));
   const bars: Record<string, Bar[]> = {};
   for (const { c, bars: b } of live) bars[c.symbol] = b;
   const missing = PORTFOLIO.filter((c) => !got.has(c.symbol)).map((c) => c.symbol);
@@ -576,8 +521,9 @@ async function core(hours: number): Promise<Core> {
       return snapshotCore(hours, (e as Error).message);
     }
   };
-  // Only fully live results are cached; a degraded brief retries on the next request.
-  return cached(`brief-core:v6:${hours}`, CORE_TTL, build, (c) => c.source === "live");
+  // Only fully live, fully read results are cached; a degraded brief, or one whose results
+  // filings are still being read, is rebuilt on the next request (everything under it is cached).
+  return cached(`brief-core:v7:${hours}`, CORE_TTL, build, (c) => c.source === "live" && !c.items.some((i) => i.results?.pending));
 }
 
 export async function buildBrief(input: Partial<Settings>): Promise<Brief> {

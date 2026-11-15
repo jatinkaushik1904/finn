@@ -18,7 +18,10 @@ export async function GET(req: NextRequest) {
     // Dev only: `?snapshot=write` refreshes data/snapshot/brief-<hours>.json from a live build.
     if (q.get("snapshot") === "write" && process.env.NODE_ENV === "development") return Response.json(await writeSnapshot(s));
     const b = await buildBrief(s);
-    return Response.json(b, { headers: { "Cache-Control": b.source === "live" ? "public, s-maxage=300, stale-while-revalidate=900" : "no-store" } });
+    // The edge may serve a complete live brief for 2 minutes (and a stale one while it refetches);
+    // a degraded brief, or one whose results filings are still being read, is never cached.
+    const settled = b.source === "live" && !b.items.some((i) => i.results?.pending);
+    return Response.json(b, { headers: { "Cache-Control": settled ? "public, max-age=0, s-maxage=120, stale-while-revalidate=600" : "no-store" } });
   } catch (e) {
     // Last resort: never leave the user with an error page if a snapshot exists.
     try {

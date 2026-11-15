@@ -1,15 +1,20 @@
 "use client";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Alert, Brief, Item } from "@/lib/brief";
+import type { Alert, Brief } from "@/lib/brief";
 import type { Research } from "@/lib/research";
+import { RESEARCH_PICKS } from "@/data/universe";
+import { isCurrent, resolveOrg } from "@/lib/network";
 import { ago, inr, inrShort, months, pct, ratio } from "@/components/format";
 import { findOrg, interpret, parseHash, Route, symbolFor, Tab, toHash } from "@/components/route";
 import { Avatar, Bars, Chevron, Label, ResultsTable, Section, Skeleton, SourceBadge, Stats, Warmth } from "@/components/ui";
+import { updateContact } from "@/components/netstore";
+import { JItem, joinBrief, knownBy, leadsFor, type Person, type UILead, useNet } from "@/components/netview";
+import { MeetManagement, NetworkPanel, Noticed, OverlapRow } from "@/components/people";
 
 const CATS = ["results", "M&A", "management_change", "litigation", "fund_raise", "capex", "credit_rating", "pledging", "insider_trading"] as const;
 const CAT_NAME: Record<string, string> = { results: "Results", "M&A": "M&A", management_change: "Mgmt change", litigation: "Litigation", fund_raise: "Fund raise", capex: "Capex", credit_rating: "Rating", pledging: "Pledge", insider_trading: "Insider" };
 const WINDOWS = [{ h: 24, l: "24h", long: "24 hours" }, { h: 72, l: "3d", long: "3 days" }, { h: 168, l: "7d", long: "7 days" }, { h: 720, l: "30d", long: "30 days" }];
-const PICKS = ["TITAN", "DIXON", "PERSISTENT", "HAL", "NAVINFLUOR"];
+const PICKS = RESEARCH_PICKS;
 const MATERIAL = 45;
 
 type Go = (r: Route, opts?: { replace?: boolean }) => void;
@@ -77,7 +82,7 @@ export default function App() {
         <button onClick={() => go({ tab: "brief" })} className="flex h-10 items-center" aria-label="FINN, go to brief">
           <span className="flex items-baseline gap-2"><span className="text-lg font-semibold tracking-tight">FINN</span><span className="text-xs text-mute">{today}</span></span>
         </button>
-        <span className="ml-auto rounded-full border border-line px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-mute" title="All contacts are fictional; employers are real companies.">Synthetic network</span>
+        <NetBadge onClick={() => go({ tab: "people" })} />
       </header>
 
       {!route && <main className="px-4"><Skeleton lines={3} /></main>}
@@ -102,6 +107,19 @@ export default function App() {
   );
 }
 
+function NetBadge({ onClick }: { onClick: () => void }) {
+  const net = useNet();
+  const mine = net.mode === "mine";
+  return (
+    <button onClick={onClick} className="-mr-1 ml-auto flex h-10 items-center px-1" aria-label={mine ? `My network, ${net.people.length} people, stored on this device` : "Demo network: fictional people at real companies"}
+      title={mine ? "Your own network: stored and matched only on this device" : "All contacts are fictional; employers are real companies"}>
+      <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ${mine ? "border-accent/40 text-accent" : "border-line text-mute"}`}>
+        {mine ? <>My network · <span className="tabular-nums">{net.people.length.toLocaleString("en-IN")}</span></> : "Demo network"}
+      </span>
+    </button>
+  );
+}
+
 /* ============================== PUSH ============================== */
 type Settings = { hours: number; volX: number; movePct: number; cares: string[] };
 const DEFAULTS: Settings = { hours: 24, volX: 2, movePct: 4, cares: ["results", "M&A", "management_change", "litigation"] };
@@ -123,6 +141,11 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
   const [showSettings, setShowSettings] = useState(false);
   const slow = useRef(false);
   const manual = useRef(false);
+  const pendingTries = useRef(0);
+  const pendingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const net = useNet();
+  const netRef = useRef(net);
+  netRef.current = net;
   // While the app is open it keeps watching: re-check every 10 minutes (alerts fire on change).
   useEffect(() => { const t = setInterval(() => setNonce((n) => n + 1), 10 * 60_000); return () => clearInterval(t); }, []);
   const [widened, setWidened] = useState<number | null>(null);
@@ -151,7 +174,13 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
           got = j as Brief;
           if (got.items.some((i) => i.priority >= MATERIAL)) break;
         }
-        if (got) { setB(got); setWidened((got.settings?.hours ?? s.hours) !== s.hours ? s.hours : null); notifyNew(got.items); }
+        if (got) {
+          setB(got); setWidened((got.settings?.hours ?? s.hours) !== s.hours ? s.hours : null); notifyNew(joinBrief(got, netRef.current, MATERIAL).items, { volX: s.volX, movePct: s.movePct, cares: s.cares });
+          // A results filing still being read: look again shortly (a few times), so the card fills in by itself.
+          const pending = got.items.some((i) => i.results?.pending && !i.collapsedInto);
+          if (pending && pendingTries.current < 8) { pendingTries.current++; pendingTimer.current = setTimeout(() => setNonce((n) => n + 1), 7000); }
+          else if (!pending) pendingTries.current = 0;
+        }
       } catch {
         if (!ac.signal.aborted) setErr("Couldn't reach FINN's server.");
       } finally {
@@ -159,11 +188,14 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
       }
     }, slow.current ? 450 : 0);
     slow.current = false;
-    return () => { clearTimeout(t); ac.abort(); };
+    return () => { clearTimeout(t); if (pendingTimer.current) clearTimeout(pendingTimer.current); ac.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  const items = b?.items ?? [];
+  // Join the public brief with the active network, in this browser (your own network never leaves it).
+  const joined = useMemo(() => (b ? joinBrief(b, net, MATERIAL) : null), [b, net]);
+  const items = joined?.items ?? [];
+  const nudges = joined?.nudges ?? [];
   const material = items.filter((i) => i.priority >= MATERIAL);
   const routine = items.filter((i) => i.priority < MATERIAL);
   const shownHours = b?.settings?.hours ?? s.hours;
@@ -210,8 +242,8 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
               );
             })}
           </div>
-          <NotifyToggle />
-          <p className="mt-3 text-[11px] leading-snug text-mute">Moves are checked on each holding&apos;s latest NSE end-of-day bar. Saved on this device. A daily after-close digest can also go to Telegram or Slack (see README).</p>
+          <NotifyToggle s={s} />
+          <p className="mt-3 text-[11px] leading-snug text-mute">Moves are checked on each holding&apos;s latest NSE end-of-day bar. Thresholds are saved on this device; with alerts on, FINN&apos;s server keeps only this device&apos;s push address and these thresholds, nothing about you or your network.</p>
         </div>
       )}
 
@@ -251,15 +283,15 @@ function BriefView({ onCompany, onPerson }: { onCompany: (s: string) => void; on
             {material.map((it, i) => <Card key={it.id} it={it} rank={i + 1} onCompany={onCompany} onPerson={onPerson} />)}
           </div>
 
-          {(b.nudges?.length ?? 0) > 0 && (
+          {nudges.length > 0 && (
             <section className="mt-6">
               <Label className="mb-2">Natural reasons to reconnect</Label>
               <div className="divide-y divide-line rounded-2xl border border-line bg-card">
-                {b.nudges.map((n) => (
+                {nudges.map((n) => (
                   <button key={n.id} onClick={() => onPerson(n.id)} className="flex min-h-12 w-full items-start gap-3 p-3 text-left">
                     <Avatar name={n.name} />
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm"><b className="font-medium">{n.name}</b> <span className="text-mute">· last spoke {months(n.months)} ago</span></div>
+                      <div className="text-sm"><b className="font-medium">{n.name}</b> <span className="text-mute">· {n.spokeKnown === false ? `connected ${months(n.months)} ago, no conversation logged` : `last spoke ${months(n.months)} ago`}</span></div>
                       <div className="text-xs leading-snug text-mute">{n.reason}</div>
                     </div>
                   </button>
@@ -316,65 +348,177 @@ function Alerts({ alerts, s, onCompany }: { alerts: Alert[]; s: Settings; onComp
   );
 }
 
-type LeadLike = { id: string; name: string; why: string; via?: string; headline?: string; relation?: string; ask?: string };
+type LeadLike = { id: string; name: string; why: string; via?: string; headline?: string; relation?: string; ask?: string; edge?: string; path?: number };
+type Merged<T> = T & { alsoVia?: string; alsoWhy?: string; alsoPath?: number };
 /** One row per person: a direct line first, with a warmer second-degree route folded in. */
-function mergeLeads<T extends LeadLike>(ls: T[]): (T & { alsoVia?: string })[] {
-  const out: (T & { alsoVia?: string })[] = [];
+function mergeLeads<T extends LeadLike>(ls: T[]): Merged<T>[] {
+  const out: Merged<T>[] = [];
   for (const l of ls) {
     const cur = out.find((x) => x.id === l.id);
     if (!cur) { out.push({ ...l }); continue; }
-    if (cur.via && !l.via) { const via = cur.via; Object.assign(cur, l, { via: undefined, alsoVia: via }); }
-    else if (l.via && !cur.via && !cur.alsoVia) cur.alsoVia = l.via;
+    if (cur.via && !l.via) { const { via, edge, path } = cur; Object.assign(cur, l, { via: undefined, edge: undefined, path: undefined, alsoVia: via, alsoWhy: edge, alsoPath: path }); }
+    else if (l.via && !cur.via && !cur.alsoVia) Object.assign(cur, { alsoVia: l.via, alsoWhy: l.edge, alsoPath: l.path });
   }
   return out;
 }
 
-// System notification for material items this device hasn't seen yet (needs the investor's permission).
-async function notifyNew(items: Item[]) {
+/* ---- alerts: Web Push when FINN is closed, a system notification when it is open ---- */
+type PushSettings = { volX: number; movePct: number; cares: string[] };
+const b64ToBytes = (b64: string) => {
+  const raw = atob((b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+};
+const canPush = () => typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && typeof Notification !== "undefined";
+const notifyOff = () => { try { return localStorage.getItem("finn.notify") === "off"; } catch { return false; } };
+async function pushSubscription(): Promise<PushSubscription | null> {
+  try { return canPush() ? (await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription()) ?? null : null; } catch { return null; }
+}
+// Tell the server this device's thresholds and what it has already shown, so the closed-app push
+// watches for what THIS investor calls unusual and never repeats something already seen here.
+async function syncPush(settings: PushSettings, seen: string[] = [], test = false): Promise<{ ok?: boolean; sent?: string; error?: string } | null> {
+  const sub = await pushSubscription();
+  if (!sub) return null;
   try {
-    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const r = await fetch("/api/push", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subscription: sub.toJSON(), settings, seen, test }) });
+    return await r.json();
+  } catch { return { error: "Couldn't reach FINN's server." }; }
+}
+
+// System notification for material items this device hasn't seen yet (needs the investor's permission).
+// The "call X" hint is joined on the device, so it can name people from the investor's own network.
+async function notifyNew(items: JItem[], settings: PushSettings) {
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted" || notifyOff()) return;
     const seen = new Set<string>(JSON.parse(localStorage.getItem("finn.seen") || "[]"));
     const fresh = items.filter((i) => i.priority >= MATERIAL && !seen.has(i.id));
     localStorage.setItem("finn.seen", JSON.stringify([...seen, ...fresh.map((i) => i.id)].slice(-400)));
     if (!fresh.length) return;
+    void syncPush(settings, fresh.map((i) => i.id));
     const title = `${fresh.length} new thing${fresh.length > 1 ? "s" : ""} worth your time`;
-    const body = fresh.slice(0, 3).map((i) => `${i.company} · ${i.label}`).join("\n");
+    const body = fresh.slice(0, 3).map((i) => `${i.company} · ${i.label}${i.leads[0] ? ` — call ${first(i.leads[0].name)}` : ""}`).join("\n");
     const reg = await navigator.serviceWorker?.register("/sw.js");
     if (reg) await reg.showNotification(title, { body, icon: "/icon-192.png", tag: "finn-brief" });
     else new Notification(title, { body });
   } catch {}
 }
 
-function NotifyToggle() {
-  const [st, setSt] = useState("default");
-  useEffect(() => { try { setSt(typeof Notification === "undefined" ? "unsupported" : Notification.permission); } catch { setSt("unsupported"); } }, []);
+function NotifyToggle({ s }: { s: Settings }) {
+  type St = "loading" | "unsupported" | "off" | "on" | "open-only" | "denied";
+  const [st, setSt] = useState<St>("loading");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [needsInstall, setNeedsInstall] = useState(false);
+  const settingsKey = `${s.volX}|${s.movePct}|${s.cares.join(",")}`;
+  const synced = useRef("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const ios = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const installed = window.matchMedia("(display-mode: standalone)").matches || (navigator as { standalone?: boolean }).standalone === true;
+        if (ios && !installed) { setNeedsInstall(true); setSt("unsupported"); return; }
+        if (typeof Notification === "undefined" || !("serviceWorker" in navigator)) return setSt("unsupported");
+        if (Notification.permission === "denied") return setSt("denied");
+        if (notifyOff()) return setSt("off");
+        setSt((await pushSubscription()) ? "on" : Notification.permission === "granted" ? "open-only" : "off");
+      } catch { setSt("unsupported"); }
+    })();
+  }, []);
+
+  // Thresholds changed while alerts are on: the server-side watch follows (debounced).
+  useEffect(() => {
+    if (st !== "on" || synced.current === settingsKey) return;
+    const t = setTimeout(() => { synced.current = settingsKey; void syncPush({ volX: s.volX, movePct: s.movePct, cares: s.cares }); }, 1500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [st, settingsKey]);
+
+  const seen = () => { try { return JSON.parse(localStorage.getItem("finn.seen") || "[]") as string[]; } catch { return []; } };
   const enable = async () => {
-    try { await navigator.serviceWorker?.register("/sw.js"); setSt(await Notification.requestPermission()); } catch { setSt("unsupported"); }
+    setBusy(true); setNote("");
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { setSt(perm === "denied" ? "denied" : "off"); return; }
+      try { localStorage.setItem("finn.notify", "on"); } catch {}
+      const cfg = canPush() ? await fetch("/api/push").then((r) => r.json()).catch(() => null) : null;
+      if (!cfg?.enabled || !cfg.publicKey) { setSt("open-only"); return; }
+      if (!(await reg.pushManager.getSubscription())) await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.publicKey) });
+      const r = await syncPush({ volX: s.volX, movePct: s.movePct, cares: s.cares }, seen());
+      if (r?.ok) { synced.current = settingsKey; setSt("on"); setNote(r.sent === "sent" ? "A confirmation push is on its way. It arrives even if you close FINN now." : ""); }
+      else { setSt("open-only"); setNote(r?.error ?? "Couldn't register this device for closed-app alerts."); }
+    } catch {
+      setSt(typeof Notification !== "undefined" && Notification.permission === "granted" ? "open-only" : "off");
+      setNote("This browser wouldn't subscribe to push, so alerts work only while FINN is open.");
+    } finally { setBusy(false); }
   };
-  if (st === "unsupported") return <p className="mt-3 text-[11px] text-mute">This browser can&apos;t show notifications — add FINN to your home screen first.</p>;
-  return st === "granted"
-    ? <p className="mt-3 text-xs text-up">Notifications on — FINN pings this device when something material lands.</p>
-    : <button onClick={enable} className="mt-3 h-10 w-full rounded-full border border-line text-xs font-medium">{st === "denied" ? "Notifications blocked in browser settings" : "Notify me on this device"}</button>;
+  const test = async () => {
+    setBusy(true);
+    const r = await syncPush({ volX: s.volX, movePct: s.movePct, cares: s.cares }, [], true);
+    setNote(r?.sent === "sent" ? "Test sent. Lock the phone or close FINN: it still arrives." : r?.error ?? "The push service didn't accept it. Turn alerts off and on again.");
+    setBusy(false);
+  };
+  const disable = async () => {
+    setBusy(true);
+    try {
+      const sub = await pushSubscription();
+      if (sub) { await fetch("/api/push", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => null); await sub.unsubscribe(); }
+      localStorage.setItem("finn.notify", "off");
+    } catch {}
+    setSt("off"); setNote("Alerts off. This device's subscription was deleted from FINN's server."); setBusy(false);
+  };
+
+  if (st === "loading") return null;
+  return (
+    <div className="mt-3 rounded-xl bg-bg p-3">
+      {st === "unsupported" && <p className="text-[11px] leading-snug text-mute">{needsInstall ? "On iPhone, add FINN to your Home Screen first (Share → Add to Home Screen) and open it from there. Apple delivers web push only to installed apps." : "This browser can't show notifications."}</p>}
+      {st === "denied" && <p className="text-[11px] leading-snug text-mute">Notifications are blocked for this site in your browser settings.</p>}
+      {st === "off" && <button onClick={enable} disabled={busy} className="h-10 w-full rounded-full bg-ink text-xs font-medium text-bg disabled:opacity-60">{busy ? "Turning on…" : "Alert me on this device, even when FINN is closed"}</button>}
+      {st === "open-only" && (
+        <>
+          <p className="text-xs text-up">Alerts on while FINN is open.</p>
+          {canPush() && <button onClick={enable} disabled={busy} className="mt-2 h-10 w-full rounded-full border border-line text-xs font-medium disabled:opacity-60">{busy ? "Turning on…" : "Also alert me when FINN is closed"}</button>}
+        </>
+      )}
+      {st === "on" && (
+        <>
+          <p className="text-xs leading-snug text-up">Alerts on, even when FINN is closed: material filings of the types you track, and closes beyond ±{s.movePct}% or {s.volX}× volume.</p>
+          <div className="mt-1 flex items-center gap-4 text-xs">
+            <button onClick={test} disabled={busy} className="h-10 font-medium text-accent disabled:opacity-60">Send a test</button>
+            <button onClick={disable} disabled={busy} className="ml-auto h-10 text-mute disabled:opacity-60">Turn off</button>
+          </div>
+        </>
+      )}
+      {note && <p className="mt-1 text-[11px] leading-snug text-mute" aria-live="polite">{note}</p>}
+    </div>
+  );
 }
 
 const first = (n: string) => n.split(" ")[0];
-function LeadRow({ l, onPerson, verb = "Call" }: { l: LeadLike & { alsoVia?: string }; onPerson: (id: string) => void; verb?: string }) {
+function LeadRow({ l, onPerson, verb = "Call" }: { l: Merged<LeadLike>; onPerson: (id: string) => void; verb?: string }) {
   return (
     <button onClick={() => onPerson(l.id)} className="flex min-h-11 w-full items-start gap-2.5 py-1 text-left">
       <Avatar name={l.name} />
       <div className="min-w-0 text-xs leading-snug">
-        <div><span className="font-medium">{l.via ? `Reach ${first(l.name)}` : `${verb} ${first(l.name)}`}</span>{l.via ? <span className="text-mute"> via {l.via}</span> : null}{l.headline && !/^Works there now/.test(l.why) ? <span className="text-mute"> · {l.headline}</span> : null}</div>
-        <div className="text-mute">{l.why}</div>
+        <div><span className="font-medium">{l.via ? `Reach ${first(l.name)}` : `${verb} ${first(l.name)}`}</span>{l.via ? <span className="text-mute"> via {l.via}</span> : null}{l.headline && !/^Works there now|^At a peer/.test(l.why) && !l.why.includes(l.headline) ? <span className="text-mute"> · {l.headline}</span> : null}</div>
+        <div className="text-mute">{l.why}{l.via && l.path != null ? <span className="tabular-nums"> · strength {l.path}</span> : null}</div>
         {l.ask ? <div className="mt-0.5 text-ink/80">Ask: “{l.ask}”</div> : null}
-        {l.alsoVia ? <div className="text-accent">Warmer route: intro via {l.alsoVia}</div> : null}
+        {l.alsoVia ? <div className="text-accent">Warmer route via {l.alsoVia}{l.alsoWhy ? ` (${l.alsoWhy})` : ""}{l.alsoPath != null ? <span className="tabular-nums"> · strength {l.alsoPath}</span> : null}</div> : null}
       </div>
     </button>
   );
 }
 
-const KIND: Record<string, string> = { "worked-with": "Worked with them", "studied-with": "Studied with them", "one-away": "One step away", "same-alma-mater": "Same alma mater" };
+// Where a results card's numbers came from, in the card's own words.
+function resultsNote(r: NonNullable<JItem["results"]>): string {
+  if (r.note) return r.note;
+  if (r.from === "filing") return `From the results filing (${r.basis ?? "consolidated"})${r.check ? ` · ${r.check}` : ""}`;
+  const base = r.ebitdaLabel === "NII" ? "From reported tables (screener.in) · NII = interest earned − interest expended" : "From reported tables (screener.in) · EBITDA = operating profit";
+  return r.check ? `${base} · ${r.check}` : base;
+}
 
-function rankReasons(it: Item) {
+function rankReasons(it: JItem) {
   const r: string[] = [`${it.label.toLowerCase()} filing`];
   for (const s of it.signals ?? []) r.push(s.charAt(0).toLowerCase() + s.slice(1));
   const lead = it.leads?.[0] as (LeadLike & { relation?: string }) | undefined;
@@ -383,7 +527,7 @@ function rankReasons(it: Item) {
   return r;
 }
 
-function Card({ it, rank, onCompany, onPerson }: { it: Item; rank: number; onCompany: (s: string) => void; onPerson: (id: string) => void }) {
+function Card({ it, rank, onCompany, onPerson }: { it: JItem; rank: number; onCompany: (s: string) => void; onPerson: (id: string) => void }) {
   const leads = mergeLeads(it.leads ?? []);
   const p = it.person;
   return (
@@ -398,27 +542,26 @@ function Card({ it, rank, onCompany, onPerson }: { it: Item; rank: number; onCom
       {it.results && (
         <div className="mt-3">
           <ResultsTable period={it.results.period} prevPeriod={it.results.prevPeriod} yoyPeriod={it.results.yoyPeriod} lines={it.results.lines ?? []}
-            ebitdaNote={(it.results as { from?: string; basis?: string; check?: string }).from === "filing"
-              ? `From the results filing (${(it.results as { basis?: string }).basis ?? "consolidated"}) · EBITDA = PBT + finance cost + D&A − other income${(it.results as { check?: string }).check ? ` · ${(it.results as { check?: string }).check}` : ""}`
-              : it.results.ebitdaLabel === "EBITDA" || !it.results.ebitdaLabel ? "From reported tables · EBITDA = operating profit" : "From reported tables · NII = interest earned − interest expended"}
-            source={it.results.source} />
+            ebitdaNote={resultsNote(it.results)} source={it.results.source} />
+          {it.results.pending && <p className="mt-1 flex items-center gap-1.5 text-[11px] text-accent" aria-live="polite"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />Reading the results filing itself. These numbers will be replaced by the filing&apos;s.</p>}
         </div>
       )}
 
       {p && (
         <div className="mt-3 rounded-xl bg-bg p-3 text-sm">
-          <div className="font-medium">{p.name}{p.role ? <span className="font-normal text-mute"> · {p.role}</span> : null}</div>
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1 font-medium">{p.name}{p.role ? <span className="font-normal text-mute"> · {p.role}</span> : null}</div>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${p.direction === "leaving" ? "bg-down/12 text-down" : p.direction === "continuing" ? "bg-line text-mute" : "bg-up/12 text-up"}`}>{p.direction === "leaving" ? "Leaving" : p.direction === "continuing" ? "Stays on" : "Joining"}</span>
+          </div>
           {p.bio && <p className="mt-1 text-xs leading-relaxed text-mute">{p.bio}</p>}
           {(p.profile?.employers?.length ?? 0) > 0 && <p className="mt-1 text-xs text-mute">Career: {p.profile.employers.map((e) => e.org).slice(0, 4).join(" → ")}</p>}
           {p.you && <p className="mt-2 text-xs font-medium text-accent">{p.you}</p>}
-          {(p.overlaps ?? []).map((o) => (
-            <button key={o.id} onClick={() => onPerson(o.id)} className="mt-1 flex min-h-10 w-full items-center gap-2 text-left text-xs">
-              <Avatar name={o.name} />
-              <span className="min-w-0"><b className="font-medium">{o.name}</b> <span className="text-mute">· {KIND[o.kind] ?? o.kind.replace(/-/g, " ")}: {o.why}</span></span>
-            </button>
-          ))}
+          {(p.overlaps ?? []).map((o) => <OverlapRow key={o.id} o={o} onPerson={onPerson} />)}
           {!p.overlaps?.length && !p.you && <p className="mt-2 text-xs text-mute">No one in your network overlaps with them directly.</p>}
-          <p className="mt-2 text-[10px] text-mute">Profile from the filing&apos;s mandatory disclosure · {p.extractedBy}</p>
+          <p className="mt-2 text-[10px] text-mute">
+            {p.bio || (p.profile?.employers?.length ?? 0) > 0 ? "Profile from the filing's mandatory disclosure" : p.direction === "leaving" ? "Exit notices carry no profile; name and role are from the filing" : "This filing carries no profile; name and role are from the filing"}
+            {p.profileUrl ? <> · <a href={p.profileUrl} target="_blank" rel="noreferrer" className="py-3.5 underline decoration-line underline-offset-2">from an earlier filing on the same change ↗</a></> : null} · {p.extractedBy}
+          </p>
         </div>
       )}
 
@@ -438,7 +581,7 @@ function Card({ it, rank, onCompany, onPerson }: { it: Item; rank: number; onCom
 /* ============================== PULL ============================== */
 type R = Research & { isFinancial?: boolean; snapshot?: unknown };
 type Verdict = { call?: string; metric?: string; promise: string; horizon?: string; delivered: string; verdict: string; note?: string; quote?: string; speaker?: string; scope?: string };
-type NarrStats = { ms?: { total?: number }; transcripts?: { call: string; pdfChars?: number; charsToFast?: number }[]; smart?: { promptChars?: number } };
+type NarrStats = { ms?: { total?: number }; transcripts?: { call: string; pdfChars?: number; charsToFast?: number }[]; smart?: { promptChars?: number; model?: string } };
 type Narr = {
   calls: { call: string; url: string; found: number; sentences: string[] }[];
   verdicts: Verdict[] | null;
@@ -453,7 +596,7 @@ const snapAt = (x: unknown) => (typeof x === "string" ? x : x && typeof x === "o
 
 function AskView({ symbol, go, onPerson }: { symbol?: string; go: Go; onPerson: (id: string) => void }) {
   const net = useNet();
-  const themes = useMemo(() => net.data?.themes.map((t) => t.theme) ?? [], [net.data]);
+  const themes = useMemo(() => net.themes.map((t) => t.theme), [net.themes]);
   const [q, setQ] = useState("");
   const [r, setR] = useState<R | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -531,7 +674,10 @@ function ResearchView({ r, onPerson }: { r: R; onPerson: (id: string) => void })
   const chg = (a: (number | null)[] | undefined, i: number, j: number) => { const x = at(a, i), y = at(a, j); return x == null || y == null || y === 0 ? null : ((x - y) / Math.abs(y)) * 100; };
   const row = (label: string, a: (number | null)[] | undefined) => ({ label, value: at(a, n - 1), qoq: chg(a, n - 1, n - 2), yoy: chg(a, n - 1, n - 5) });
   const snap = snapAt(r.snapshot);
-  const leads = mergeLeads(r.network ?? []);
+  // Who can help: matched in this browser against the active network (the server's demo-network
+  // answer in r.network is ignored, so an imported network is never mixed with the demo).
+  const net = useNet();
+  const leads = useMemo(() => mergeLeads(leadsFor({ name: r.name, symbol: r.symbol, sector: r.industry ?? r.sector ?? undefined }, undefined, net.contacts, 4)), [r.name, r.symbol, r.industry, r.sector, net.contacts]);
   const b = r.balance;
   const days = [["Debtor", b?.debtorDays], ["Inventory", b?.inventoryDays], ["Payable", b?.payableDays]].filter(([, v]) => v != null).map(([k, v]) => `${k} ${v}d`);
 
@@ -570,10 +716,12 @@ function ResearchView({ r, onPerson }: { r: R; onPerson: (id: string) => void })
       )}
 
       {leads.length > 0 && (
-        <Section title="Who can help you understand this">
+        <Section title="Who can help you understand this" aside={net.mode === "mine" ? "your network" : "demo"}>
           {leads.map((l) => <LeadRow key={l.id + (l.via ?? "")} l={l} onPerson={onPerson} verb="Call" />)}
         </Section>
       )}
+
+      <MeetManagement symbol={r.symbol} company={r.name} onPerson={onPerson} />
 
       {n > 0 && (
         <Section title="Last 8 quarters" aside="₹ cr">
@@ -712,7 +860,7 @@ function Narrative({ symbol, fallback }: { symbol: string; fallback: { bull: str
             Read {nr.calls.map((c, i) => <span key={c.call}>{i ? ", " : ""}<a href={c.url} target="_blank" rel="noreferrer" className="py-3.5 underline decoration-line underline-offset-2">{c.call}</a></span>)}
             {nr.asOf ? ` · judged against numbers to ${nr.asOf}` : null}
             {pdfChars > 0 && fastChars > 0 ? <span className="tabular-nums"> · {kChars(pdfChars)} chars of transcript → {kChars(fastChars)} of management guidance sent to the model</span> : null}
-            {nr.model ? ` · extracted by ${nr.model.fast}, judged by ${nr.model.smart}` : null}
+            {nr.model ? ` · extracted by ${nr.model.fast}, judged by ${nr.stats?.smart?.model ?? nr.model.smart}` : null}
             {nr.cached ? " · cached" : null}
             {nr.partial ? " · some calls couldn't be read" : null}
             {nr.snapshot ? " · from a stored snapshot" : null}
@@ -733,85 +881,77 @@ function Narrative({ symbol, fallback }: { symbol: string; fallback: { bull: str
 }
 
 /* ============================== NETWORK ============================== */
-type C = { id: string; name: string; headline: string; city: string; tie: string; howMet: string; lastSpoke: string; months: number; warmth: number; expertise: string[]; career: { org: string; role: string; from: number; to?: number }[]; education: { school: string; degree: string; from: number; to: number }[]; knows: string[] };
-type Net = { contacts: C[]; themes: { theme: string; people: { id: string; name: string }[] }[] };
-let netCache: Net | null = null;
-let netReq: Promise<Net> | null = null;
-function useNet() {
-  const [data, setData] = useState<Net | null>(netCache);
-  const [error, setError] = useState(false);
-  useEffect(() => {
-    if (netCache) return;
-    netReq ??= fetch("/api/network").then((r) => r.json()).then((j: Net) => { if (!Array.isArray(j?.contacts)) throw new Error("bad"); netCache = j; return j; });
-    netReq.then(setData).catch(() => { netReq = null; setError(true); });
-  }, []);
-  return { data, error };
-}
-
-type Leads = { company: string; leads: (LeadLike & { relation?: string; score?: number })[] };
+// Everything below matches in this browser against the active network: the demo network, or the
+// investor's own import (components/netstore.ts), which is never sent anywhere.
+type Leads = { company: string; leads: UILead[] };
 const REL: Record<string, string> = { inside: "Inside", alumni: "Alumni", peer: "Peer", theme: "Expert", second: "Intro" };
+const LIST_STEP = 40;
 
 function PeopleView({ theme, co, go, onPerson, onCompany }: { theme?: string; co?: string; go: Go; onPerson: (id: string) => void; onCompany: (s: string) => void }) {
-  const { data: net, error } = useNet();
+  const net = useNet();
   const [q, setQ] = useState("");
-  const [leads, setLeads] = useState<Leads | null>(null);
-  const [leadsErr, setLeadsErr] = useState(false);
+  const [limit, setLimit] = useState(LIST_STEP);
+  useEffect(() => setLimit(LIST_STEP), [theme, net.contacts]);
 
-  useEffect(() => {
-    if (!co) { setLeads(null); return; }
-    const ac = new AbortController();
-    setLeads(null); setLeadsErr(false);
-    fetch(`/api/network?company=${encodeURIComponent(co)}`, { signal: ac.signal })
-      .then((r) => r.json()).then((j: Leads) => setLeads({ company: j?.company ?? co, leads: j?.leads ?? [] }))
-      .catch(() => { if (!ac.signal.aborted) setLeadsErr(true); });
-    return () => ac.abort();
-  }, [co]);
+  const leads = useMemo<Leads | null>(() => {
+    if (!co) return null;
+    const org = resolveOrg(co);
+    const company = org?.name ?? co;
+    return { company, leads: leadsFor({ name: company, symbol: org?.symbol, sector: org?.sector, themes: org?.themes }, co, net.contacts, 6) };
+  }, [co, net.contacts]);
 
-  const themes = useMemo(() => net?.themes.map((t) => t.theme) ?? [], [net]);
+  const themes = useMemo(() => net.themes.map((t) => t.theme), [net.themes]);
   const ask = (e: React.FormEvent) => {
     e.preventDefault();
     const text = q.trim(); if (!text) return;
-    const i = interpret(text, themes);
-    if (i.kind === "people" && (i.theme || i.co)) go({ tab: "people", theme: i.theme, co: i.co });
-    else go({ tab: "people", co: findOrg(text)?.name ?? text });
+    const low = text.toLowerCase();
+    const byName = text.length >= 3 ? net.people.filter((c) => c.name.toLowerCase().includes(low)) : [];
+    if (byName.length === 1) onPerson(byName[0].id);
+    else {
+      const i = interpret(text, themes);
+      if (i.kind === "people" && (i.theme || i.co)) go({ tab: "people", theme: i.theme, co: i.co });
+      else go({ tab: "people", co: findOrg(text)?.name ?? text });
+    }
     setQ("");
     (document.activeElement as HTMLElement | null)?.blur();
   };
-  const shown = useMemo(() => (theme ? net?.contacts.filter((c) => c.expertise.includes(theme)) : net?.contacts) ?? [], [net, theme]);
+  const shown = useMemo(() => (theme ? net.people.filter((c) => c.expertise.includes(theme)) : net.people), [net.people, theme]);
   const chips = useMemo(() => {
-    const base = net?.themes.filter((t) => t.people.length > 1) ?? [];
-    const sel = theme && !base.some((t) => t.theme === theme) ? net?.themes.find((t) => t.theme === theme) : undefined;
+    const base = net.themes.filter((t) => t.people.length > 1).slice(0, 18);
+    const sel = theme && !base.some((t) => t.theme === theme) ? net.themes.find((t) => t.theme === theme) : undefined;
     return sel ? [sel, ...base] : base;
-  }, [net, theme]);
+  }, [net.themes, theme]);
 
-  if (error) return <main className="px-4 py-6 text-sm text-down">Couldn&apos;t load your network.</main>;
-  if (!net) return <main className="px-4"><Skeleton lines={4} label="Loading your network…" /></main>;
-  const coSymbol = leads ? symbolFor(leads.company) : undefined;
+  if (!net.ready) return <main className="px-4"><Skeleton lines={4} label="Loading your network…" /></main>;
+  const coSymbol = leads ? symbolFor(leads.company) ?? resolveOrg(leads.company)?.symbol : undefined;
   const merged = mergeLeads(leads?.leads ?? []);
+  const mine = net.mode === "mine";
 
   return (
-    <main className="px-4">
-      <form onSubmit={ask} className="pb-2" role="search">
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Who should I call about… (company or topic)" aria-label="Find people by company or topic"
+    <main className="px-4 pb-4">
+      <NetworkPanel compact={!!co || !!theme} />
+
+      <form onSubmit={ask} className="pb-2 pt-3" role="search">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Who to call: company, topic or name" aria-label="Find people by company, topic or name"
           autoCapitalize="none" autoCorrect="off" enterKeyHint="search"
           className="h-12 w-full rounded-2xl border border-line bg-card px-4 text-[15px] outline-none placeholder:text-mute focus:border-accent" />
       </form>
 
       {co && (
         <Section title={`Who to call about ${leads?.company ?? co}`} aside={<button onClick={() => go({ tab: "people", theme })} className="-my-3 h-10 px-1 text-mute" aria-label="Clear company">Clear ×</button>}>
-          {!leads && !leadsErr && <Skeleton lines={1} />}
-          {leadsErr && <p className="text-xs text-down">Couldn&apos;t look that up.</p>}
-          {leads && (merged.length ? merged.map((l) => (
+          {merged.length ? merged.map((l) => (
             <div key={l.id + (l.via ?? "")} className="flex items-start gap-2">
               <div className="min-w-0 flex-1"><LeadRow l={l} onPerson={onPerson} /></div>
               {l.relation && <span className="mt-2 shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wide text-mute">{REL[l.relation] ?? l.relation}</span>}
             </div>
-          )) : <p className="text-xs text-mute">No one in your network yet. A gap worth filling before you need it.</p>)}
+          )) : <p className="text-xs text-mute">No one in your network yet. A gap worth filling before you need it.</p>}
           {coSymbol && <button onClick={() => onCompany(coSymbol)} className="mt-1 h-10 text-xs font-medium text-accent">Research {coSymbol} →</button>}
         </Section>
       )}
 
-      <Label className="mb-2 mt-4">Expertise map</Label>
+      <Noticed net={net} onPerson={onPerson} onCompanyPeople={(name) => go({ tab: "people", co: name })} />
+
+      <Label className="mb-2 mt-5">Expertise map</Label>
       <div className="flex flex-wrap gap-1.5">
         {chips.map((t) => (
           <button key={t.theme} aria-pressed={theme === t.theme} onClick={() => go({ tab: "people", co, theme: theme === t.theme ? undefined : t.theme }, { replace: true })}
@@ -819,30 +959,43 @@ function PeopleView({ theme, co, go, onPerson, onCompany }: { theme?: string; co
             {t.theme} <span className="tabular-nums opacity-60">{t.people.length}</span>
           </button>
         ))}
+        {!chips.length && <p className="text-xs text-mute">No expertise tags yet. Add them in the FINN sheet.</p>}
       </div>
 
       <div className="mb-2 mt-5 flex items-baseline justify-between">
         <Label>{theme ? `Go-to people for ${theme}` : "Everyone, warmest first"}</Label>
-        <span className="text-[10px] text-mute">warmth · last spoke</span>
+        <span className="text-[10px] tabular-nums text-mute">{shown.length > limit ? `${limit} of ${shown.length.toLocaleString("en-IN")} · ` : ""}warmth · last spoke</span>
       </div>
       <div className="divide-y divide-line rounded-2xl border border-line bg-card">
-        {shown.map((c) => (
+        {shown.slice(0, limit).map((c) => (
           <button key={c.id} onClick={() => onPerson(c.id)} className="flex min-h-14 w-full items-center gap-3 px-3 py-2.5 text-left">
             <Avatar name={c.name} />
-            <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{c.name}</div><div className="truncate text-xs text-mute">{c.headline}</div></div>
-            <Warmth v={c.warmth} months={c.months} />
+            <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{c.name}</div><div className="truncate text-xs text-mute">{c.headline || c.howMet}</div></div>
+            <Warmth v={c.warmth} months={c.months} unknown={c.spokeKnown === false} />
           </button>
         ))}
         {!shown.length && <p className="p-3 text-xs text-mute">No one tagged with {theme} yet.</p>}
+        {shown.length > limit && <button onClick={() => setLimit((n) => n + LIST_STEP * 5)} className="h-12 w-full text-xs font-medium text-accent">Show more</button>}
       </div>
-      <p className="mt-3 text-[11px] leading-snug text-mute">All people are synthetic; their employers are real, so the network overlaps the portfolio. Warmth = tie strength × how recently you spoke.</p>
+      <p className="mt-3 text-[11px] leading-snug text-mute">
+        {mine
+          ? "Your network, matched on this device. A LinkedIn export carries only current company and title, so FINN infers expertise from those and treats everyone as an acquaintance until you say otherwise. Add the FINN sheet for past roles, schools and how close you are."
+          : "All people are synthetic; their employers are real, so the network overlaps the portfolio."}{" "}
+        Warmth = tie strength × how recently you spoke. Who-knows-whom links come from shared employers and schools in overlapping years.
+      </p>
     </main>
   );
 }
 
+const TIES = ["close", "friend", "professional", "acquaintance"] as const;
+const stintYears = (s: { from?: number; to?: number; ended?: boolean }) =>
+  s.from != null || s.to != null ? `${s.from ?? "?"}–${s.to ?? (isCurrent(s) ? "now" : "?")}` : isCurrent(s) ? "now" : "earlier";
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
 function PersonSheet({ id, onClose, onCompany, onPerson, onTheme }: { id: string; onClose: () => void; onCompany: (s: string) => void; onPerson: (id: string) => void; onTheme: (t: string) => void }) {
-  const { data: net } = useNet();
-  const c = net?.contacts.find((x) => x.id === id);
+  const net = useNet();
+  const c: Person | undefined = net.byId.get(id);
+  const knows = useMemo(() => (c ? knownBy(c.id, net.contacts).slice(0, 6) : []), [c, net.contacts]);
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -852,6 +1005,7 @@ function PersonSheet({ id, onClose, onCompany, onPerson, onTheme }: { id: string
     closeRef.current?.focus({ preventScroll: true });
     return () => { window.removeEventListener("keydown", k); document.body.style.overflow = prev; };
   }, [onClose]);
+  const mine = net.mode === "mine";
 
   return (
     <div className="scrim fixed inset-0 z-40 flex items-end bg-black/45" onClick={onClose}>
@@ -861,40 +1015,72 @@ function PersonSheet({ id, onClose, onCompany, onPerson, onTheme }: { id: string
         <button ref={closeRef} onClick={onClose} aria-label="Close" className="absolute right-3 top-3 grid h-10 w-10 place-items-center rounded-full text-mute">
           <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
         </button>
-        {!net ? <Skeleton lines={3} /> : !c ? <p className="py-6 text-sm text-mute">That person isn&apos;t in your network.</p> : (
+        {!net.ready ? <Skeleton lines={3} /> : !c ? <p className="py-6 text-sm text-mute">That person isn&apos;t in {mine ? "your" : "the demo"} network.</p> : (
           <>
-            <div className="flex items-center gap-3 pr-10"><Avatar name={c.name} big /><div className="min-w-0"><div className="text-lg font-semibold leading-tight">{c.name}</div><div className="text-xs text-mute">{c.headline} · {c.city}</div></div></div>
-            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-mute"><Warmth v={c.warmth} months={c.months} /><span>{c.tie} · {c.howMet}</span></div>
+            <div className="flex items-center gap-3 pr-10"><Avatar name={c.name} big /><div className="min-w-0"><div className="text-lg font-semibold leading-tight">{c.name}</div><div className="text-xs text-mute">{[c.headline, c.city].filter(Boolean).join(" · ")}</div></div></div>
+            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-mute">
+              <Warmth v={c.warmth} months={c.months} unknown={c.spokeKnown === false} />
+              <span>{[c.tie, c.howMet, c.spokeKnown === false ? "no conversation logged" : null].filter(Boolean).join(" · ")}</span>
+            </div>
+            {mine && (
+              <div className="mt-3">
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="How close you are">
+                  {TIES.map((t) => (
+                    <button key={t} aria-pressed={c.tie === t} aria-label={`Mark as ${t}`} onClick={() => updateContact(c.id, { tie: t })}
+                      className={`h-10 rounded-full px-3 text-xs ${c.tie === t ? "bg-ink text-bg" : "border border-line bg-card text-mute"}`}>{t}</button>
+                  ))}
+                  <button onClick={() => updateContact(c.id, { lastSpoke: todayISO(), spokeKnown: true })} className="h-10 rounded-full border border-line bg-card px-3 text-xs font-medium">Spoke today</button>
+                </div>
+                <p className="mt-1 text-[10px] text-mute">Your edits stay on this device and feed warmth.</p>
+              </div>
+            )}
 
-            <Label className="mb-1 mt-5">Career</Label>
-            <ol className="border-l border-line pl-3">
-              {[...c.career].reverse().map((s, i) => {
-                const sym = symbolFor(s.org);
-                return (
-                  <li key={i} className="py-1 text-sm leading-snug">
-                    {sym ? <button onClick={() => onCompany(sym)} className="-my-3 py-3 font-medium underline decoration-line underline-offset-4">{s.org}</button> : <span className="font-medium">{s.org}</span>}
-                    <span className="text-mute"> · {s.role} · <span className="tabular-nums">{s.from}–{s.to ?? "now"}</span></span>
-                  </li>
-                );
-              })}
-            </ol>
-
-            <Label className="mb-1 mt-4">Education</Label>
-            {c.education.map((e, i) => <p key={i} className="py-0.5 text-sm">{e.school} <span className="text-mute">· {e.degree} · <span className="tabular-nums">{e.from}–{e.to}</span></span></p>)}
-
-            <Label className="mb-2 mt-4">Ask them about</Label>
-            <div className="flex flex-wrap gap-1.5">{c.expertise.map((e) => <button key={e} onClick={() => onTheme(e)} className="h-10 rounded-full border border-line bg-card px-3 text-xs">{e}</button>)}</div>
-
-            {c.knows.length > 0 && (
+            {c.career.length > 0 && (
               <>
-                <Label className="mb-1 mt-4">Can introduce you to</Label>
-                {c.knows.map((k) => net.contacts.find((x) => x.id === k)).filter((x): x is C => !!x).map((k) => (
-                  <button key={k.id} onClick={() => onPerson(k.id)} className="flex min-h-11 w-full items-center gap-2.5 text-left">
-                    <Avatar name={k.name} /><span className="min-w-0 text-sm"><span className="font-medium">{k.name}</span> <span className="text-xs text-mute">· {k.headline}</span></span>
+                <Label className="mb-1 mt-5">Career</Label>
+                <ol className="border-l border-line pl-3">
+                  {[...c.career].reverse().map((s, i) => {
+                    const sym = symbolFor(s.org) ?? resolveOrg(s.org)?.symbol;
+                    return (
+                      <li key={i} className="py-1 text-sm leading-snug">
+                        {sym ? <button onClick={() => onCompany(sym)} className="-my-3 py-3 font-medium underline decoration-line underline-offset-4">{s.org}</button> : <span className="font-medium">{s.org}</span>}
+                        <span className="text-mute">{s.role ? ` · ${s.role}` : ""} · <span className="tabular-nums">{stintYears(s)}</span></span>
+                      </li>
+                    );
+                  })}
+                </ol>
+              </>
+            )}
+
+            {c.education.length > 0 && (
+              <>
+                <Label className="mb-1 mt-4">Education</Label>
+                {c.education.map((e, i) => <p key={i} className="py-0.5 text-sm">{e.school} <span className="text-mute">{e.degree ? `· ${e.degree} ` : ""}{e.from || e.to ? <>· <span className="tabular-nums">{e.from ?? "?"}–{e.to ?? "?"}</span></> : null}</span></p>)}
+              </>
+            )}
+
+            {c.expertise.length > 0 && (
+              <>
+                <Label className="mb-2 mt-4">Ask them about</Label>
+                <div className="flex flex-wrap gap-1.5">{c.expertise.map((e) => <button key={e} onClick={() => onTheme(e)} className="h-10 rounded-full border border-line bg-card px-3 text-xs">{e}</button>)}</div>
+                {c.derivedExpertise && <p className="mt-1 text-[10px] text-mute">Inferred from their employer and title.</p>}
+              </>
+            )}
+
+            {knows.length > 0 && (
+              <>
+                <Label className="mb-1 mt-4">Probably knows</Label>
+                {knows.map(({ c: k, edge }) => (
+                  <button key={k.id} onClick={() => onPerson(k.id)} className="flex min-h-11 w-full items-center gap-2.5 py-0.5 text-left">
+                    <Avatar name={k.name} />
+                    <span className="min-w-0 flex-1 text-xs leading-snug"><span className="text-sm font-medium">{k.name}</span> <span className="text-mute">· {edge.why}</span></span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-mute" title="How likely they know each other, 0–100">{edge.strength}</span>
                   </button>
                 ))}
               </>
             )}
+
+            {c.url && <a href={c.url} target="_blank" rel="noreferrer" className="mt-4 inline-flex h-10 items-center text-xs font-medium text-accent">LinkedIn profile ↗</a>}
           </>
         )}
       </div>

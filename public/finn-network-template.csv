@@ -1,0 +1,5 @@
+# FINN network sheet: one row per person. Lists are separated by ";" and parts by "|". tie is close | friend | professional | acquaintance (use self on one row for your own background). Dates are YYYY-MM-DD. Rows ending in (example) are ignored: replace them with your own. This file never leaves your device: FINN reads it in the browser.
+name,company,role,past_roles,schools,expertise,tie,last_spoke,city
+Asha Verghese (example),Titan Company,Head of Retail Operations,"Hindustan Unilever|Area Sales Manager|2014|2019; Trent|Store Operations Lead|2019|2022",IIM Ahmedabad|2012|2014,consumer; retail; jewellery,friend,2026-08-14,Bengaluru
+Rohan Iqbal (example),Dixon Technologies,GM Mobile Manufacturing,Samsung|Production Engineer|2011|2018,IIT Kanpur|2007|2011,electronics manufacturing; pli,professional,2025-12-02,Noida
+Me (example),ENAM,Investment Analyst,Kotak Mahindra Bank|Equity Research Associate|2018|2020,IIT Delhi|2014|2018; IIM Ahmedabad|2020|2022,,self,,Mumbai

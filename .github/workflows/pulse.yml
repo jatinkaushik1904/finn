@@ -1,0 +1,31 @@
+name: pulse
+
+# Calls FINN's /api/cron every 15 minutes in Indian market hours, so a material filing or an
+# unusual close reaches subscribed devices (Web Push) within minutes. Vercel's free cron runs once
+# a day (vercel.json); this is the faster heartbeat. The endpoint is idempotent: each device is
+# sent each item once.
+#
+# Setup (once): repository variable FINN_URL = https://<your-deployment>, and repository secret
+# CRON_SECRET = the same value as the deployment's CRON_SECRET.
+
+on:
+  schedule:
+    - cron: "*/15 3-14 * * 1-5" # 08:30–20:15 IST, Monday–Friday
+    - cron: "30 4,10 * * 0,6" # twice a day at weekends (results are often filed on Saturdays)
+  workflow_dispatch:
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ask FINN to check for anything new
+        env:
+          FINN_URL: ${{ vars.FINN_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$FINN_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "FINN_URL (variable) and CRON_SECRET (secret) are not set: nothing to do."
+            exit 0
+          fi
+          curl -fsS --max-time 90 -H "Authorization: Bearer $CRON_SECRET" "$FINN_URL/api/cron" | head -c 800

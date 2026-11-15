@@ -1,12 +1,16 @@
 import { buildBrief, DEFAULT_SETTINGS } from "@/lib/brief";
 import { cached, DAY } from "@/lib/cache";
+import { pushAll } from "@/lib/push";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-// Real push: Vercel Cron calls this after market close (vercel.json). It builds the brief and
-// sends only the material items to the investor's own channel — a Telegram bot
-// (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID) or any Slack-style webhook (WEBHOOK_URL).
+// Real push. A scheduler calls this — Vercel Cron once a day after the close (vercel.json), and
+// the repo's GitHub Actions "pulse" every 15 minutes in market hours. It builds the brief and:
+//   1. Web Push: each subscribed device gets what is new under ITS OWN thresholds, once
+//      (lib/push.ts) — this is the alert that arrives with FINN closed;
+//   2. optionally, the same digest to a Telegram bot (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID) or
+//      any Slack-style webhook (WEBHOOK_URL).
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET;
   if (secret && req.headers.get("authorization") !== `Bearer ${secret}`) return new Response("unauthorized", { status: 401 });
@@ -40,5 +44,6 @@ export async function GET(req: Request) {
       sent.push(`webhook:${r?.status ?? "failed"}`);
     }
   }
-  return Response.json({ material: material.length, alerts: b.alerts.length, sent, preview: text });
+  const push = await pushAll((s) => buildBrief({ ...s, hours: 24 })).catch((e) => ({ error: String((e as Error).message).slice(0, 120) }));
+  return Response.json({ material: material.length, alerts: b.alerts.length, sent, push, preview: text });
 }

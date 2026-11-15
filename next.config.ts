@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   turbopack: { root: path.join(__dirname) },
   // Ship the committed snapshots with the serverless functions (fallback when the exchange blocks cloud IPs).
-  outputFileTracingIncludes: { "/api/**": ["./data/snapshot/**"] },
+  outputFileTracingIncludes: { "/api/**": ["./data/snapshot/**", "./data/seed/**"] },
 };
 
 export default nextConfig;

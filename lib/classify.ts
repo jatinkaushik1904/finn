@@ -50,6 +50,12 @@ const NOT_ROUTINE = /acquisition|resign|appoint|preferential|qualified instituti
 // Exchange-sought clarifications on media reports, and the company's replies.
 const CLARIFY = /news verification|rumou?r verification|sought clarification|clarification (regarding|on|with respect to) (the )?(news|media|article)|news (report|item|article)/i;
 
+const RESULTS_ENCLOSED = /(?:un)?audited[^.]{0,80}financial results?|financial results? for the (?:quarter|period|half|year|first|second|third|fourth)/i;
+
+// A listed parent or subsidiary publishing ITS numbers ("Reference to the Financial Results issued
+// by Suzuki Motor Corporation") is not this company's results: no results card, routine priority.
+const OTHERS_RESULTS = /results? (?:issued|announced|declared|published|released|reported) by\b|results? of (?:its |the |our )?(?:holding|parent|promoter|ultimate holding|subsidiar|associate|joint venture)/i;
+
 const firstRule = (s: string) => RULES.find(([, re]) => re.test(s))?.[0];
 const MATERIAL_CATS = new Set<Category>(["results", "M&A", "fund_raise", "management_change", "litigation", "capex", "pledging", "credit_rating"]);
 
@@ -57,6 +63,7 @@ export function classify(desc: string, text: string, doc = ""): Category {
   const head = `${desc} :: ${text}`;
   // Exchange-provided descriptors for clear-cut cases first.
   if (/^copy of newspaper/i.test(desc)) return "unclassified";
+  if (OTHERS_RESULTS.test(head) && !/^(financial result|outcome of board meeting)/i.test(desc)) return "press_release";
   if (CLARIFY.test(head)) {
     const c = firstRule(text.replace(/clarification|news verification|rumou?r verification/gi, "")) ?? (doc ? firstRule(doc) : undefined);
     return c && MATERIAL_CATS.has(c) ? c : "press_release";
@@ -65,7 +72,9 @@ export function classify(desc: string, text: string, doc = ""): Category {
     if (/presentation/i.test(text) && !/schedule|intimation/i.test(text)) return "results";
     return /transcript|recording|earnings call|conference call|results/i.test(text) ? "earnings_call" : "investor_meetings";
   }
-  if (/^outcome of board meeting/i.test(desc) && /financial result/i.test(text)) return "results";
+  // A board-meeting outcome is the results filing when NSE's line — or, failing that, the letter
+  // itself — says the financial results are enclosed (Trent's line is just "Outcome of Board Meeting").
+  if (/^outcome of board meeting/i.test(desc) && (/financial result/i.test(text) || RESULTS_ENCLOSED.test(doc.slice(0, 1500)))) return "results";
   if (/^financial result/i.test(desc)) return "results";
   if (ROUTINE.test(head) && !NOT_ROUTINE.test(desc)) return "unclassified";
   const c = firstRule(head);
@@ -75,7 +84,11 @@ export function classify(desc: string, text: string, doc = ""): Category {
   if (doc) {
     const lead = stripBoilerplate(doc.slice(0, 1200)).slice(0, 700);
     if (ROUTINE.test(lead) && !NOT_ROUTINE.test(lead)) return "unclassified";
-    return earliestRule(doc.replace(DEBARRED, " ")) ?? c ?? "unclassified";
+    const clean = doc.replace(DEBARRED, " ");
+    const first = earliestRule(clean);
+    // "Chairman and Managing Director Shri X welcomed…" names a title; it is not a change of one.
+    if (first === "management_change" && !sentences(clean).some((x) => CHANGE_VERB.test(x) && roleTier(x))) return earliestRule(clean, "management_change") ?? c ?? "unclassified";
+    return first ?? c ?? "unclassified";
   }
   return c ?? "unclassified";
 }
@@ -85,10 +98,10 @@ const VAGUE_DESC = /^(general updates?|updates?|issue of securities|other restru
 // Director appointments carry "not debarred ... by virtue of any order passed by SEBI" — not litigation.
 const DEBARRED = /not debarred[^.]{0,240}\./gi;
 // In a letter, what is said first is what the letter is about.
-function earliestRule(s: string): Category | undefined {
+function earliestRule(s: string, skip?: Category): Category | undefined {
   let best: { c: Category; at: number } | undefined;
   for (const [c, re] of RULES) {
-    if (c === "press_release") continue; // its words ("order", "contract") appear in everything
+    if (c === "press_release" || c === skip) continue; // press release: its words ("order", "contract") appear in everything
     const m = re.exec(s);
     if (m && (!best || m.index < best.at)) best = { c, at: m.index };
   }
@@ -142,7 +155,7 @@ export function cleanSummary(text: string, company: string) {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-const GENERIC = /^(general updates?|updates?|change in (management|director\(s\)( of the company)?|directors?)|resignation( of director\/kmp\/smp| of director of the company)?|appointment|retirement|credit rating|bagging\/receiving of orders\/contracts|action\(s\) (initiated|taken) or orders passed|other restructuring|acquisition|corporate insolvency resolution process|outcome of (the )?board meeting( held [^.]{0,40})?|press release|a press release dated [^,]{4,30}\.?|intimation|disclosure|issue of securities|media statement|please find attached a media statement issued by the company)\.?$/i;
+const GENERIC = /^(general updates?|updates?|change in (management|director\(s\)( of the company)?|directors?)|resignation( of director\/kmp\/smp| of director of the company)?|appointment|retirement|credit rating|bagging\/receiving of orders\/contracts|action\(s\) (initiated|taken) or orders passed|other restructuring|acquisition|corporate insolvency resolution process|outcome of (the )?board meeting( held .{0,60})?|press release|a press release dated [^,]{4,30}\.?|intimation|disclosure|issue of securities|media statement|please find attached a media statement issued by the company)\.?$/i;
 export function isGeneric(desc: string, summary: string) {
   const s = stripBoilerplate(summary).replace(/\s+/g, " ").trim();
   return s.length < 12 || GENERIC.test(s) || s.toLowerCase() === desc.toLowerCase().trim();
@@ -159,7 +172,9 @@ const SALUTE = /^\s*(?:dear\s+)?(?:sirs?|madam)(?:\s*\/\s*(?:sirs?|madam))?\s*[,
 
 function split(t: string): { body: string; annex: string } {
   const cut = t.search(SIGN_OFF);
-  if (cut > 40) return { body: t.slice(0, cut).trim(), annex: t.slice(cut).slice(0, 3000) };
+  // Sign-off right at the start: the letter says nothing itself ("A media statement is attached"
+  // sits in the subject line), and what follows is the signature block and the enclosure.
+  if (cut >= 0) return { body: t.slice(0, cut).trim(), annex: t.slice(cut).slice(0, 3000) };
   return { body: t.slice(0, 3000).trim(), annex: "" };
 }
 
@@ -267,7 +282,7 @@ function docSummary(L: Letter, cat: Category): string | undefined {
   }
   const subj = stripBoilerplate(L.subject).replace(/^(?:intimation|disclosure|information)\s+(?:of|regarding|about|on)\s+/i, "");
   if (subj.length >= 12 && !GENERIC.test(subj) && !/^(outcome of (the )?board meeting|intimation|disclosure|media statement)\b/i.test(subj)) return tidy(subj);
-  const pick = (t: string) => sentences(t).map(stripBoilerplate).find((x) => x.length > 30 && INFORMATIVE.test(x) && !/is attached|enclosed herewith|find (?:enclosed|attached)|for (?:your )?(?:information|records?)|hosted on the website|available on the website/i.test(x));
+  const pick = (t: string) => sentences(t).map(stripBoilerplate).find((x) => x.length > 30 && INFORMATIVE.test(x) && !/is attached|enclosed herewith|find (?:enclosed|attached)|for (?:your )?(?:information|records?)|hosted on the website|available on the website|digitally signed|yours (?:faithfully|sincerely|truly)|thanking you|company secretary|compliance officer|membership no|regd\.? office|\bCIN\b|copy to/i.test(x));
   const s = pick(L.body) ?? (cat === "press_release" ? pick(L.annex) : undefined);
   return s ? tidy(s) : subj.length >= 12 ? tidy(subj) : undefined;
 }
@@ -321,7 +336,8 @@ export function basePriority(cat: Category, text: string) {
       else if (/commercial paper|non[- ]convertible|\bncds?\b|debentures|bonds|enabling resolution/i.test(t)) p = 25;
       break;
     case "press_release":
-      if (/ultra[- ]?mega/i.test(t)) p = 70;
+      if (OTHERS_RESULTS.test(t)) p = 20;
+      else if (/ultra[- ]?mega/i.test(t)) p = 70;
       else if (/\bmega\b/i.test(t)) p = 66;
       else if (/\(\s*\*?\s*major\s*\*?\s*\)|\bmajor\*/i.test(t)) p = 58;
       else if (/\(\s*\*?\s*large\s*\*?\s*\)|\blarge\*/i.test(t)) p = 48;
@@ -383,7 +399,9 @@ export function assess(desc: string, text: string, company: string, doc?: string
     if (isGeneric(desc, summary0)) summary = docSummary(L, category) ?? summary0;
     else if (category === "litigation") summary = actionDetails(L.annex) ?? summary0;
   } else if (L && isGeneric(desc, summary0)) {
-    summary = docSummary(L, category) ?? summary0;
+    // Results whose NSE line is just "Outcome of Board Meeting": say what the letter encloses.
+    const m = category === "results" ? `${L.subject} ${L.body}`.match(/((?:un)?audited[^.;]{0,70}financial results?[^.;]{0,70}?ended (?:on )?[^.,;]{4,24}\d{4})/i) : null;
+    summary = m ? tidy(m[1]) : docSummary(L, category) ?? summary0;
   }
   const base = basePriority(category, ptext);
   const priority = followUp ? Math.max(base - followUp, Math.min(base, 20)) : base;

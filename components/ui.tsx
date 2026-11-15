@@ -86,13 +86,15 @@ export function Avatar({ name, big }: { name: string; big?: boolean }) {
   );
 }
 
-export function Warmth({ v, months }: { v: number; months: number }) {
+/** Warmth bar + months since you last spoke ("—" when no conversation is logged, e.g. a LinkedIn import). */
+export function Warmth({ v, months, unknown }: { v: number; months: number; unknown?: boolean }) {
+  const none = unknown || !Number.isFinite(months);
   return (
-    <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-mute" title={`Warmth ${v}/100`}>
+    <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-mute" title={`Warmth ${v}/100${none ? " · no conversation logged" : ""}`}>
       <span className="h-1.5 w-8 overflow-hidden rounded-full bg-line">
         <span className="block h-full rounded-full bg-accent" style={{ width: `${Math.max(6, Math.min(100, v))}%` }} />
       </span>
-      <span className="w-9 text-right">{months < 1 ? "<1 mo" : `${months} mo`}</span>
+      <span className="w-9 text-right">{none ? "—" : months < 1 ? "<1 mo" : `${months} mo`}</span>
     </span>
   );
 }

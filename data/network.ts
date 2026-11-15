@@ -1,7 +1,7 @@
-// SYNTHETIC network. Every person here is fictional. Their employers are real
-// companies so that the network overlaps with the portfolio. In production this
-// would be the investor's own uploaded contacts + consented profile data
-// (see README: "Network data & privacy").
+// SYNTHETIC demo network. Every person here is fictional. Their employers are real
+// companies so that the network overlaps with the portfolio. The investor's REAL network
+// (LinkedIn Connections.csv or the FINN template) is imported in the People tab, stays on
+// their device, and is matched in the browser with the same lib/network.ts functions.
 
 export type Stint = { org: string; role: string; from: number; to?: number }; // to undefined = current
 export type Edu = { school: string; degree: string; from: number; to: number };
@@ -17,7 +17,7 @@ export type Contact = {
   career: Stint[];
   education: Edu[];
   expertise: string[];
-  knows: string[]; // ids of other contacts they're close to (graph edges)
+  knows: string[]; // explicit edges: ids of contacts they know. More edges are inferred from shared employers/schools.
 };
 
 export const INVESTOR = {
@@ -191,6 +191,15 @@ CONTACTS.push(
     career: [{ org: "Tata Motors", role: "Manager, Corporate Strategy", from: 2009, to: 2018 }, { org: "Independent", role: "Auto-sector consultant", from: 2018 }],
     education: [{ school: "IIT Delhi", degree: "B.Tech Mechanical", from: 2005, to: 2009 }],
     expertise: ["autos", "ev", "tata group"], knows: ["gautam"],
+  },
+  // No hand-written "knows" edge: FINN infers that Sanjana and Devika know each other because
+  // they overlapped at Dr. Reddy's for five years (lib/network.ts knowsGraph).
+  {
+    id: "sanjana", name: "Sanjana Pillai", headline: "Director, Quality Compliance — Biocon", city: "Bengaluru", tie: "friend",
+    howMet: "Neighbour in Bandra, 2021", lastSpoke: "2026-10-04",
+    career: [{ org: "Dr. Reddy's", role: "Quality Assurance Manager", from: 2012, to: 2017 }, { org: "Biocon", role: "Director, Quality Compliance", from: 2017 }],
+    education: [{ school: "Manipal College of Pharmaceutical Sciences", degree: "M.Pharm", from: 2010, to: 2012 }],
+    expertise: ["pharma", "usfda", "quality compliance"], knows: [],
   },
 );
 
