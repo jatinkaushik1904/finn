@@ -6,7 +6,7 @@ Hello,
 Here is my submission for the FINN build challenge.
 
 - **Prototype** (open on a phone): https://finn-psi-one.vercel.app
-- **Repository:** [GitHub repo link]
+- **Repository:** https://github.com/jatinkaushik1904/finn
 - **AI build history:** attached (`AI_BUILD_HISTORY.html`), the full Claude Code session: every prompt I gave, every reply, and each action it took.
 
 **What I built**
